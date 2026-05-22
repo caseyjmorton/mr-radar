@@ -7,7 +7,7 @@ const OUTPUT_SIZE = 240;
 const DEFAULT_ZOOM = 6;    // ~122 nm radius, matches standard NEXRAD reflectivity range
 const MAX_ZOOM = 7;        // RainViewer API hard limit
 const MIN_ZOOM = 1;
-const DEFAULT_OPACITY = 25;       // percent — radar reflectivity
+const DEFAULT_OPACITY = 60;       // percent — radar reflectivity (screen-blended in vintage)
 const MAP_OVERLAY_OPACITY = 0.85; // labels overlay lifted above radar — high opacity since bg is transparent
 const CANVAS_SIZE = TILE_SIZE * 2; // 512x512 stitched canvas
 
@@ -64,7 +64,8 @@ async function renderFrame(lat, lon, fmt, theme = 'vintage', zoom = DEFAULT_ZOOM
     const top = Math.floor(i / 2) * TILE_SIZE;
     const left = (i % 2) * TILE_SIZE;
     if (baseBuffers[i])        inputs.push({ input: baseBuffers[i],        top, left });
-    if (dimmedRadarBuffers[i]) inputs.push({ input: dimmedRadarBuffers[i], top, left, blend: 'over' });
+    // Screen blend keeps radar colors vivid over the dark base instead of darkening them toward it.
+    if (dimmedRadarBuffers[i]) inputs.push({ input: dimmedRadarBuffers[i], top, left, blend: isVintage ? 'screen' : 'over' });
     if (dimmedOverlayBuffers[i]) inputs.push({ input: dimmedOverlayBuffers[i], top, left, blend: 'over' });
   }
 
