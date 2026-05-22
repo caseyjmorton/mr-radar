@@ -1,14 +1,13 @@
 const sharp = require('sharp');
 const { getTileBlock, TILE_SIZE } = require('./tileMath');
-const { fetchOsmTile, fetchCartoDarkTile, fetchCartoLabelsTile, fetchRadarTile } = require('./tiles');
+const { fetchOsmTile, fetchCartoDarkTile, fetchCartoDarkAllTile, fetchRadarTile } = require('./tiles');
 const { getLatestFrame, radarTileUrl } = require('./rainviewer');
 
 const OUTPUT_SIZE = 240;
 const DEFAULT_ZOOM = 6;    // ~122 nm radius, matches standard NEXRAD reflectivity range
 const MAX_ZOOM = 7;        // RainViewer API hard limit
 const MIN_ZOOM = 1;
-const DEFAULT_OPACITY = 40;       // percent — radar reflectivity (screen-blended in vintage)
-const MAP_OVERLAY_OPACITY = 0.85; // labels overlay lifted above radar — high opacity since bg is transparent
+const DEFAULT_OPACITY = 80;       // percent — radar reflectivity (screen-blended in vintage)
 const CANVAS_SIZE = TILE_SIZE * 2; // 512x512 stitched canvas
 
 const frameCache = new Map();
@@ -22,6 +21,18 @@ async function applyOpacity(buffer, factor) {
     data[i] = Math.round(data[i] * factor);
   }
   return sharp(data, { raw: { width: info.width, height: info.height, channels: 4 } }).png().toBuffer();
+}
+
+// Build a transparent overlay of just a CARTO tile's bright features (borders,
+// labels) using luminance as an alpha mask, so an `over` blend floats them above
+// the radar without muting it. dark_all at zoom 6 is dark: bg lum ~6-20, features ~40-68.
+async function featureOverlay(buffer) {
+  const rgb = sharp(buffer).removeAlpha();
+  const [colors, alpha] = await Promise.all([
+    rgb.clone().linear(3.5, 30).toBuffer(),                          // hard-brighten dim feature colors
+    rgb.clone().grayscale().linear(7, -210).toColourspace('b-w').toBuffer(), // luminance → alpha mask
+  ]);
+  return sharp(colors).joinChannel(alpha).png().toBuffer();
 }
 
 async function renderFrame(lat, lon, fmt, theme = 'vintage', zoom = DEFAULT_ZOOM, opacity = DEFAULT_OPACITY) {
@@ -47,15 +58,15 @@ async function renderFrame(lat, lon, fmt, theme = 'vintage', zoom = DEFAULT_ZOOM
     Promise.all(tiles.map(t =>
       fetchRadarTile(radarTileUrl(frame.host, frame.path, t.z, t.x, t.y)).catch(() => null)
     )),
-    // Vintage: dark_all at low opacity on top so borders + labels sit above the radar.
+    // Vintage: dark_all (borders + labels) → masked feature overlay above the radar.
     isVintage
-      ? Promise.all(tiles.map(t => fetchCartoLabelsTile(t.z, t.x, t.y).catch(() => null)))
+      ? Promise.all(tiles.map(t => fetchCartoDarkAllTile(t.z, t.x, t.y).catch(() => null)))
       : Promise.resolve([null, null, null, null]),
   ]);
 
-  const [dimmedRadarBuffers, dimmedOverlayBuffers] = await Promise.all([
+  const [dimmedRadarBuffers, featureBuffers] = await Promise.all([
     Promise.all(radarBuffers.map(b => b ? applyOpacity(b, opacityFactor) : null)),
-    Promise.all(overlayBuffers.map(b => b ? applyOpacity(b, MAP_OVERLAY_OPACITY) : null)),
+    Promise.all(overlayBuffers.map(b => b ? featureOverlay(b) : null)),
   ]);
 
   // Composite order: base → radar → map overlay (borders + labels float above radar).
@@ -66,7 +77,8 @@ async function renderFrame(lat, lon, fmt, theme = 'vintage', zoom = DEFAULT_ZOOM
     if (baseBuffers[i])        inputs.push({ input: baseBuffers[i],        top, left });
     // Screen blend keeps radar colors vivid over the dark base instead of darkening them toward it.
     if (dimmedRadarBuffers[i]) inputs.push({ input: dimmedRadarBuffers[i], top, left, blend: isVintage ? 'screen' : 'over' });
-    if (dimmedOverlayBuffers[i]) inputs.push({ input: dimmedOverlayBuffers[i], top, left, blend: 'over' });
+    // Masked feature overlay: crisp bright borders + labels over the radar, transparent elsewhere.
+    if (featureBuffers[i])     inputs.push({ input: featureBuffers[i],     top, left, blend: 'over' });
   }
 
   // Canvas fill color: neutral gray for modern, near-black for vintage (matches CARTO dark tiles).
