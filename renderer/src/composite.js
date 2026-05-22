@@ -27,14 +27,14 @@ async function applyOpacity(buffer, factor) {
 // ~25-41, water brighter). Lift the dim features while keeping the background near
 // black, so borders + water read under the screen-blended radar without graying out.
 async function brightenBase(buffer) {
-  return sharp(buffer).linear(3.2, -18).png().toBuffer();
+  return sharp(buffer).linear(4.6, -22).png().toBuffer();
 }
 
 // dark_only_labels has a native (anti-aliased) alpha channel and bright text.
 // Brighten only the RGB toward white — leave alpha untouched so there's no masking
 // and no background haze. This keeps labels crisp instead of crushing them.
 async function brightenLabels(buffer) {
-  return sharp(buffer).linear([1.8, 1.8, 1.8, 1], [40, 40, 40, 0]).png().toBuffer();
+  return sharp(buffer).linear([1.2, 1.2, 1.2, 1], [10, 10, 10, 0]).png().toBuffer();
 }
 
 async function renderFrame(lat, lon, fmt, theme = 'vintage', zoom = DEFAULT_ZOOM, opacity = DEFAULT_OPACITY) {
