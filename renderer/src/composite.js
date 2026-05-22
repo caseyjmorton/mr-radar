@@ -1,6 +1,6 @@
 const sharp = require('sharp');
 const { getTileBlock, TILE_SIZE } = require('./tileMath');
-const { fetchOsmTile, fetchCartoDarkTile, fetchCartoDarkAllTile, fetchRadarTile } = require('./tiles');
+const { fetchOsmTile, fetchCartoDarkTile, fetchCartoLabelsTile, fetchRadarTile } = require('./tiles');
 const { getLatestFrame, radarTileUrl } = require('./rainviewer');
 
 const OUTPUT_SIZE = 240;
@@ -8,7 +8,7 @@ const DEFAULT_ZOOM = 6;    // ~122 nm radius, matches standard NEXRAD reflectivi
 const MAX_ZOOM = 7;        // RainViewer API hard limit
 const MIN_ZOOM = 1;
 const DEFAULT_OPACITY = 25;       // percent — radar reflectivity
-const MAP_OVERLAY_OPACITY = 0.12; // dark_all overlay lifted above radar (borders + labels)
+const MAP_OVERLAY_OPACITY = 0.85; // labels overlay lifted above radar — high opacity since bg is transparent
 const CANVAS_SIZE = TILE_SIZE * 2; // 512x512 stitched canvas
 
 const frameCache = new Map();
@@ -49,7 +49,7 @@ async function renderFrame(lat, lon, fmt, theme = 'vintage', zoom = DEFAULT_ZOOM
     )),
     // Vintage: dark_all at low opacity on top so borders + labels sit above the radar.
     isVintage
-      ? Promise.all(tiles.map(t => fetchCartoDarkAllTile(t.z, t.x, t.y).catch(() => null)))
+      ? Promise.all(tiles.map(t => fetchCartoLabelsTile(t.z, t.x, t.y).catch(() => null)))
       : Promise.resolve([null, null, null, null]),
   ]);
 
