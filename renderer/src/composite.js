@@ -7,7 +7,7 @@ const OUTPUT_SIZE = 240;
 const DEFAULT_ZOOM = 6;    // ~122 nm radius, matches standard NEXRAD reflectivity range
 const MAX_ZOOM = 7;        // RainViewer API hard limit
 const MIN_ZOOM = 1;
-const DEFAULT_OPACITY = 60;       // percent — radar reflectivity (screen-blended in vintage)
+const DEFAULT_OPACITY = 40;       // percent — radar reflectivity (screen-blended in vintage)
 const MAP_OVERLAY_OPACITY = 0.85; // labels overlay lifted above radar — high opacity since bg is transparent
 const CANVAS_SIZE = TILE_SIZE * 2; // 512x512 stitched canvas
 
