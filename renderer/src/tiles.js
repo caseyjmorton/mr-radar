@@ -24,16 +24,37 @@ async function fetchBuffer(url, ttlMs) {
   return data;
 }
 
+// CARTO subdomains for load balancing
+const CARTO_SUBDOMAINS = ['a', 'b', 'c', 'd'];
+let cartoSubdomainIdx = 0;
+
 function osmTileUrl(z, x, y) {
   return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+}
+
+function cartoDarkUrl(style, z, x, y) {
+  const s = CARTO_SUBDOMAINS[cartoSubdomainIdx++ % CARTO_SUBDOMAINS.length];
+  return `https://${s}.basemaps.cartocdn.com/${style}/${z}/${x}/${y}.png`;
 }
 
 async function fetchOsmTile(z, x, y) {
   return fetchBuffer(osmTileUrl(z, x, y), OSM_TTL_MS);
 }
 
+async function fetchCartoDarkTile(z, x, y) {
+  return fetchBuffer(cartoDarkUrl('dark_nolabels', z, x, y), OSM_TTL_MS);
+}
+
+async function fetchCartoLabelsTile(z, x, y) {
+  return fetchBuffer(cartoDarkUrl('dark_only_labels', z, x, y), OSM_TTL_MS);
+}
+
+async function fetchCartoDarkAllTile(z, x, y) {
+  return fetchBuffer(cartoDarkUrl('dark_all', z, x, y), OSM_TTL_MS);
+}
+
 async function fetchRadarTile(url) {
   return fetchBuffer(url, RADAR_TTL_MS);
 }
 
-module.exports = { fetchOsmTile, fetchRadarTile };
+module.exports = { fetchOsmTile, fetchCartoDarkTile, fetchCartoLabelsTile, fetchCartoDarkAllTile, fetchRadarTile };

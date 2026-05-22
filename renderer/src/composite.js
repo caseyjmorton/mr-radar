@@ -1,69 +1,76 @@
 const sharp = require('sharp');
 const { getTileBlock, TILE_SIZE } = require('./tileMath');
-const { fetchOsmTile, fetchRadarTile } = require('./tiles');
+const { fetchOsmTile, fetchCartoDarkTile, fetchCartoDarkAllTile, fetchRadarTile } = require('./tiles');
 const { getLatestFrame, radarTileUrl } = require('./rainviewer');
 
 const OUTPUT_SIZE = 240;
-const ZOOM = 7;
+const DEFAULT_ZOOM = 6;    // ~122 nm radius, matches standard NEXRAD reflectivity range
+const MAX_ZOOM = 7;        // RainViewer API hard limit
+const MIN_ZOOM = 1;
+const DEFAULT_OPACITY = 25;       // percent — radar reflectivity
+const MAP_OVERLAY_OPACITY = 0.12; // dark_all overlay lifted above radar (borders + labels)
 const CANVAS_SIZE = TILE_SIZE * 2; // 512x512 stitched canvas
 
 const frameCache = new Map();
 const FRAME_CACHE_TTL_MS = 5 * 60 * 1000;
 
-// Dark navy base map for vintage theme: grayscale + darken + semi-transparent navy overlay.
-async function vintageBaseMap(buf) {
-  const dark = await sharp(buf).grayscale().modulate({ brightness: 0.35 }).png().toBuffer();
-  const overlay = await sharp({
-    create: { width: TILE_SIZE, height: TILE_SIZE, channels: 4, background: { r: 10, g: 20, b: 80, alpha: 0.45 } },
-  }).png().toBuffer();
-  return sharp(dark).composite([{ input: overlay, blend: 'over' }]).png().toBuffer();
+// Scale the alpha channel of a radar tile by a factor in [0, 1].
+async function applyOpacity(buffer, factor) {
+  if (factor >= 1) return buffer;
+  const { data, info } = await sharp(buffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  for (let i = 3; i < data.length; i += 4) {
+    data[i] = Math.round(data[i] * factor);
+  }
+  return sharp(data, { raw: { width: info.width, height: info.height, channels: 4 } }).png().toBuffer();
 }
 
-async function renderFrame(lat, lon, fmt, theme = 'modern') {
+async function renderFrame(lat, lon, fmt, theme = 'vintage', zoom = DEFAULT_ZOOM, opacity = DEFAULT_OPACITY) {
   const frame = await getLatestFrame();
 
   // Round coords to ~11m precision so nearby devices share cache entries.
-  const key = `${lat.toFixed(4)},${lon.toFixed(4)},${fmt},${theme},${frame.path}`;
+  const key = `${lat.toFixed(4)},${lon.toFixed(4)},${fmt},${theme},${zoom},${opacity},${frame.path}`;
   const cached = frameCache.get(key);
   if (cached && Date.now() - cached.time < FRAME_CACHE_TTL_MS) {
     return cached.payload;
   }
 
-  const { tiles, stitchedX, stitchedY } = getTileBlock(lat, lon, ZOOM);
+  const { tiles, stitchedX, stitchedY } = getTileBlock(lat, lon, zoom);
 
-  // Fetch all tiles in parallel; failures return null so we degrade gracefully.
-  const [osmBuffers, radarBuffers] = await Promise.all([
-    Promise.all(tiles.map(t => fetchOsmTile(t.z, t.x, t.y).catch(() => null))),
-    Promise.all(
-      tiles.map(t =>
-        fetchRadarTile(radarTileUrl(frame.host, frame.path, t.z, t.x, t.y)).catch(() => null)
-      )
-    ),
+  const opacityFactor = opacity / 100;
+  const isVintage = theme === 'vintage';
+
+  // Fetch all tile layers in parallel; failures return null so we degrade gracefully.
+  const [baseBuffers, radarBuffers, overlayBuffers] = await Promise.all([
+    Promise.all(tiles.map(t =>
+      (isVintage ? fetchCartoDarkTile : fetchOsmTile)(t.z, t.x, t.y).catch(() => null)
+    )),
+    Promise.all(tiles.map(t =>
+      fetchRadarTile(radarTileUrl(frame.host, frame.path, t.z, t.x, t.y)).catch(() => null)
+    )),
+    // Vintage: dark_all at low opacity on top so borders + labels sit above the radar.
+    isVintage
+      ? Promise.all(tiles.map(t => fetchCartoDarkAllTile(t.z, t.x, t.y).catch(() => null)))
+      : Promise.resolve([null, null, null, null]),
   ]);
 
-  const baseBuffers = theme === 'vintage'
-    ? await Promise.all(osmBuffers.map(b => b ? vintageBaseMap(b) : null))
-    : osmBuffers;
+  const [dimmedRadarBuffers, dimmedOverlayBuffers] = await Promise.all([
+    Promise.all(radarBuffers.map(b => b ? applyOpacity(b, opacityFactor) : null)),
+    Promise.all(overlayBuffers.map(b => b ? applyOpacity(b, MAP_OVERLAY_OPACITY) : null)),
+  ]);
 
-  // Build composite inputs for sharp: base map tiles first, radar tiles on top.
+  // Composite order: base → radar → map overlay (borders + labels float above radar).
   const inputs = [];
   for (let i = 0; i < 4; i++) {
-    if (!baseBuffers[i]) continue;
-    inputs.push({ input: baseBuffers[i], top: Math.floor(i / 2) * TILE_SIZE, left: (i % 2) * TILE_SIZE });
-  }
-  for (let i = 0; i < 4; i++) {
-    if (!radarBuffers[i]) continue;
-    inputs.push({
-      input: radarBuffers[i],
-      top: Math.floor(i / 2) * TILE_SIZE,
-      left: (i % 2) * TILE_SIZE,
-      blend: 'over',
-    });
+    const top = Math.floor(i / 2) * TILE_SIZE;
+    const left = (i % 2) * TILE_SIZE;
+    if (baseBuffers[i])        inputs.push({ input: baseBuffers[i],        top, left });
+    if (dimmedRadarBuffers[i]) inputs.push({ input: dimmedRadarBuffers[i], top, left, blend: 'over' });
+    if (dimmedOverlayBuffers[i]) inputs.push({ input: dimmedOverlayBuffers[i], top, left, blend: 'over' });
   }
 
-  // Canvas fill color: neutral gray for modern, deep navy for vintage (shows at tile edges/gaps).
+  // Canvas fill color: neutral gray for modern, near-black for vintage (matches CARTO dark tiles).
   const canvasBg = theme === 'vintage'
-    ? { r: 5, g: 10, b: 40, alpha: 1 }
+    ? { r: 26, g: 26, b: 26, alpha: 1 }
     : { r: 180, g: 180, b: 180, alpha: 1 };
 
   // Stitch into a 512x512 canvas.
@@ -100,7 +107,7 @@ async function renderFrame(lat, lon, fmt, theme = 'modern') {
   const payload = {
     buffer,
     timestamp: frame.timestamp,
-    partial: osmBuffers.some(b => !b) || radarBuffers.some(b => !b),
+    partial: baseBuffers.some(b => !b) || radarBuffers.some(b => !b) || overlayBuffers.some(b => !b),
     fmt,
   };
 
@@ -129,4 +136,4 @@ function rgb888ToRgb565BE(buf) {
   return out;
 }
 
-module.exports = { renderFrame };
+module.exports = { renderFrame, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, DEFAULT_OPACITY };
