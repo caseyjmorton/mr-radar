@@ -4,16 +4,16 @@ Guidance for AI agents (Claude Code) working in this repository. Read this fully
 
 ## What this project is
 
-**mr-radar** is an open-source weather radar display. An ESP32-C3 drives a round 240x240 TFT and shows live NEXRAD precipitation radar composited over a base map, centered on the owner's nearest radar station. The name is a nod to the radar scene in Mel Brooks' *Spaceballs* ("We ain't found shit!").
+**mr-radar** is an open-source weather radar display. An ESP32-S3 drives a round 240x240 TFT and shows live NEXRAD precipitation radar composited over a base map, centered on the owner's nearest radar station. The name is a nod to the radar scene in Mel Brooks' *Spaceballs* ("We ain't found shit!").
 
 The defining product constraint: **a person must be able to flash the firmware, enter their WiFi credentials and their nearest NEXRAD station ID, and have a working device with no other infrastructure.** The firmware must never depend on a server that only the maintainer runs. Protect this constraint in every decision.
 
 ## Architecture (read this before writing any code)
 
-The ESP32-C3 cannot decode or composite map tiles — it has ~400KB RAM and no PNG decoder, and a single decoded zoom-7 tile is ~512KB. Fetching tiles directly from providers would also violate OpenStreetMap's tile usage policy when fanned out across many devices. Therefore the work is split:
+The microcontroller should not decode or composite map tiles: there is no on-device PNG decoder, and fetching tiles directly from providers would violate OpenStreetMap's tile usage policy when fanned out across many devices. (The ESP32-S3 has 2 MB PSRAM, so RAM is no longer the binding constraint it was on the C3 — but the no-decoder and provider-ToS reasons stand on their own.) Therefore the work is split:
 
 ```
-ESP32-C3 firmware  --HTTPS GET-->  stateless renderer  --tiles-->  RainViewer + OSM
+ESP32-S3 firmware  --HTTPS GET-->  stateless renderer  --tiles-->  RainViewer + OSM
    (dumb client)   <--image blob--   (does the heavy        (upstream data sources)
                                        lifting + cache)
 ```
@@ -28,7 +28,7 @@ If a proposed change pushes tile decoding or compositing onto the device, or mak
 
 ```
 mr-radar/
-├── firmware/    # MicroPython for the ESP32-C3. This is what people flash.
+├── firmware/    # MicroPython for the ESP32-S3. This is what people flash.
 ├── renderer/    # Stateless image service (Node.js + sharp). Optionally self-hosted.
 ├── enclosure/   # OpenSCAD -> STL. NOT YET STARTED. Do not create files here
 │                #   unless explicitly asked; it is handled in a separate effort.
@@ -40,25 +40,28 @@ Keep firmware and renderer concerns strictly separated. They communicate only ov
 
 ## Hardware target
 
-- **MCU:** ESP32-C3 "super mini" dev board. Single-core RISC-V, ~400KB usable RAM, native USB-CDC serial.
+- **MCU:** Waveshare ESP32-S3-Zero. Dual-core Xtensa LX7 @ 240 MHz, 512 KB SRAM + 2 MB PSRAM, 4 MB flash, native USB-CDC serial. (We originally targeted an ESP32-C3 "super mini," but those boards have a notorious antenna/PA defect — a unit that refused WiFi association at any usable range, while a known-good board on the same network connected instantly, forced the switch. Avoid the C3 super mini; the S3-Zero's GPIO map keeps the same display pins.)
 - **Display:** 240×240 round TFT, GC9A01 controller, SPI (write-only, no MISO). 1.28" diameter.
-- **Default pin map** (assign explicitly in code; do not trust board silkscreen):
-  | Display | GPIO |
-  |---|---|
-  | SCK | 4 |
-  | MOSI | 5 |
-  | DC | 6 |
-  | CS | 7 |
-  | RST | 8 |
-  | BLK | 3V3 (or a GPIO for dimming) |
+- **Default pin map** — uses the module's silkscreen labels (assign explicitly in code; labels are I2C-style but the interface is 4-wire SPI):
 
-  Treat the pin map as configuration, not hard-coded magic numbers.
+  | Module pin | Function | GPIO |
+  | --- | --- | --- |
+  | VCC | 3.3–5 V power (onboard XC6206 LDO) | 3V3 |
+  | GND | Ground | GND |
+  | SCL | SPI clock | 4 |
+  | SDA | SPI data (MOSI) | 5 |
+  | DC | Data/command | 6 |
+  | CS | Chip select | 7 |
+  | RST | Reset (onboard 10k pullup) | 8 |
 
-### ESP32-C3 flashing facts that bite people
+  **No backlight pin:** this module's backlight is hardwired on (LEDA → 2Ω → 3.3 V), so PWM dimming is not possible without a hardware mod. On the ESP32-S3, GPIO8 is a plain GPIO (not a strapping pin, unlike the C3), so RST here is unconstrained and the display's onboard 10k pullup is harmless. Logic is 3.3 V, matching the S3 — no level shifting needed. Verified working with `SPI(1)` (its default `miso=13` is a free pin; avoid `SPI(2)`, whose default `miso=37` collides with PSRAM). See `firmware/WIRING.md` for the full pinout, schematic notes, and dimensions. Treat the pin map as configuration, not hard-coded magic numbers.
+
+### ESP32-S3 flashing facts that bite people
 - Flash offset is **`0x0`**, NOT `0x1000` (that's the classic ESP32). Getting this wrong produces a board that won't boot.
-- Erase before flashing: `esptool.py --chip esp32c3 erase_flash`.
-- If auto-reset into download mode fails on a clone: hold BOOT, tap RST, release BOOT.
-- Native USB-CDC can be flaky on clones; serial drops are usually the cause, not the code.
+- Erase before flashing: `esptool.py --chip esp32s3 erase_flash`.
+- Use the `ESP32_GENERIC_S3` MicroPython build.
+- If auto-reset into download mode fails: hold BOOT, tap RST (or replug USB), release BOOT.
+- Native USB-CDC re-enumerates after flashing/reset, so the serial device name (e.g. `/dev/ttyACM0`) can change — re-check it if a connection fails.
 
 ## The HTTP contract (firmware <-> renderer)
 
@@ -180,13 +183,13 @@ At zoom 7 the owner's location often falls near a tile edge, so a centered 240×
 **Done:**
 
 1. ✅ Renderer MVP — fetch + composite + crop + serve RGB565/JPEG; station database; themes.
+2. ✅ MicroPython flashed; REPL over serial verified (ESP32-S3-Zero).
+3. ✅ Display bring-up: vendored GC9A01 driver (`gc9a01py.py`) + test pattern; wiring proven on the S3-Zero.
+4. ✅ Firmware client loop (`radar.py`): WiFi + `GET /frame?station=KILN&fmt=rgb565` + blit + sleep, tested end-to-end against the renderer.
 
 **Remaining:**
 
-1. Flash MicroPython; verify REPL over serial.
-2. Display bring-up: GC9A01 driver + a test pattern. Prove wiring before anything networked.
-3. Firmware client loop: WiFi + `GET /frame?station=KILN&fmt=rgb565` + blit + sleep.
-4. Robustness pass: last-good-frame, status indicator, watchdog, provisioning.
-5. Polish: JPEG transport, backlight dimming, OTA, animated loop (renderer-driven).
+1. Robustness pass: last-good-frame, status indicator, watchdog, provisioning (currently a plain `secrets.py`).
+2. Polish: JPEG transport, OTA, animated loop (renderer-driven). (Backlight dimming is *not* possible on the current display module — its backlight is hardwired on; would require a different module or a hardware mod.)
 
 Enclosure is out of scope here.

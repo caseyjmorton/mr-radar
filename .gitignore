@@ -1,2 +1,5 @@
 node_modules/
 .claude/settings.local.json
+
+# Device provisioning - real WiFi creds / station / renderer URL
+firmware/secrets.py

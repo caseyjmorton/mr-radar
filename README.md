@@ -1,6 +1,6 @@
 # mr-radar
 
-A tiny weather radar display. An ESP32-C3 drives a round 240×240 TFT and continuously shows live NEXRAD precipitation radar composited over a base map, centered on your nearest radar station.
+A tiny weather radar display. An ESP32-S3 drives a round 240×240 TFT and continuously shows live NEXRAD precipitation radar composited over a base map, centered on your nearest radar station.
 
 The name is a nod to the radar scene in Mel Brooks' *Spaceballs*. We hope you find *something* on it.
 
@@ -12,10 +12,10 @@ A small, always-on desk object that shows you what the weather radar is doing ri
 
 ## How it works
 
-The ESP32-C3 is too small to decode and composite map imagery itself (limited RAM, no on-device PNG decoder), and having many devices pull tiles directly from public providers would abuse those providers' usage policies. So the work is split in two:
+The device deliberately doesn't decode or composite map imagery itself (no on-device PNG decoder), and having many devices pull tiles directly from public providers would abuse those providers' usage policies. So the work is split in two:
 
 ```text
-ESP32-C3 firmware  --HTTPS GET-->  stateless renderer  --tiles-->  RainViewer + OSM
+ESP32-S3 firmware  --HTTPS GET-->  stateless renderer  --tiles-->  RainViewer + OSM
    (dumb client)   <--image blob--   (does the heavy        (radar + base map)
                                        lifting + caching)
 ```
@@ -29,7 +29,7 @@ You can use the **public default renderer** (no setup) or **self-host your own**
 
 ```text
 mr-radar/
-├── firmware/    # MicroPython for the ESP32-C3 — this is what you flash
+├── firmware/    # MicroPython for the ESP32-S3 — this is what you flash
 ├── renderer/    # Stateless image service (Node.js + sharp) — optional to self-host
 ├── enclosure/   # 3D-printable case (OpenSCAD → STL) — coming later
 ├── CLAUDE.md    # guidance for AI-assisted development
@@ -38,23 +38,22 @@ mr-radar/
 
 ## Hardware
 
-- **ESP32-C3 "super mini"** dev board
+- **Waveshare ESP32-S3-Zero** dev board (we tried the ESP32-C3 "super mini" first, but its antenna/PA is unreliable — skip it)
 - **240×240 round TFT**, GC9A01 controller, SPI, 1.28" diameter
 
-Default wiring (configurable in firmware):
+Default wiring (configurable in firmware; pins use the module's silkscreen labels):
 
-| Display | ESP32-C3 GPIO |
+| Module pin | ESP32-S3 GPIO |
 | --- | --- |
-| SCK | 4 |
-| MOSI | 5 |
+| VCC | 3V3 |
+| GND | GND |
+| SCL | 4 |
+| SDA | 5 |
 | DC | 6 |
 | CS | 7 |
 | RST | 8 |
-| BLK | 3V3 |
-| VCC | 3V3 |
-| GND | GND |
 
-The GC9A01 is write-only — no MISO connection needed.
+`SCL`/`SDA` are I2C-style labels but the interface is 4-wire SPI (`SCL` = clock, `SDA` = MOSI). The GC9A01 is write-only, so no MISO is needed, and the backlight is hardwired on (no control pin). Logic is 3.3 V, matching the ESP32-S3 — no level shifting. See [`firmware/WIRING.md`](firmware/WIRING.md) for the full pinout, schematic notes, and dimensions.
 
 ## Getting started
 
@@ -65,13 +64,13 @@ Look up the four-letter WSR-88D station ID nearest to you. The renderer's `/stat
 ### 2. Flash the firmware
 
 1. Install tooling: `pip install esptool mpremote`
-2. Download a current MicroPython ESP32-C3 build from [micropython.org/download](https://micropython.org/download/).
-3. Erase and flash (note the `0x0` offset — the C3 is **not** `0x1000`):
+2. Download a current MicroPython `ESP32_GENERIC_S3` build from [micropython.org/download](https://micropython.org/download/).
+3. Erase and flash (note the `0x0` offset — the S3 is **not** `0x1000`):
 
    ```bash
-   esptool.py --chip esp32c3 --port /dev/ttyACM0 erase_flash
-   esptool.py --chip esp32c3 --port /dev/ttyACM0 --baud 460800 \
-       write_flash -z 0x0 ESP32_GENERIC_C3-<version>.bin
+   esptool.py --chip esp32s3 --port /dev/ttyACM0 erase_flash
+   esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 460800 \
+       write_flash -z 0x0 ESP32_GENERIC_S3-<version>.bin
    ```
 
 4. Confirm the REPL: `mpremote connect /dev/ttyACM0 repl` (Ctrl-] to exit).
@@ -162,6 +161,10 @@ Radar updates roughly every 5 minutes upstream, and at the supported zoom level 
 ## Contributing
 
 Early days — issues and discussion welcome. If you're using AI-assisted tooling, read [`CLAUDE.md`](CLAUDE.md) first; it captures the architecture constraints that keep the device server-independent.
+
+## Acknowledgements
+
+- Display driver: [gc9a01py](https://github.com/russhughes/gc9a01py) by Russ Hughes (MIT) — vendored in `firmware/`; license preserved at [`firmware/LICENSE.gc9a01py`](firmware/LICENSE.gc9a01py).
 
 ## License
 
