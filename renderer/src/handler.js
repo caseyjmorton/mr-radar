@@ -16,7 +16,7 @@ async function frameHandler(req, res) {
     lat = parseFloat(q.lat);
     lon = parseFloat(q.lon);
     if (!isFinite(lat) || !isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
-      return res.status(400).json({ error: 'Provide station=KILN or valid lat/lon coordinates' });
+      return res.status(400).json({ error: 'Provide station=<nexrad-station-id> or valid lat/lon coordinates' });
     }
   }
 

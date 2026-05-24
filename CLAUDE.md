@@ -163,9 +163,51 @@ Do not have the device poll upstream providers. Do not have the renderer re-fetc
 
 At zoom 7 the owner's location often falls near a tile edge, so a centered 240×240 crop may span up to 4 adjacent tiles. The renderer fetches a 2×2 tile block (512×512 stitched), then crops the 240×240 window centered on the station's pixel position. See `src/tileMath.js` for the implementation. A naive single-tile fetch will put the location in a corner — don't do it.
 
+## Firmware provisioning & settings
+
+Configuration lives in `/config.json` on the device's LittleFS. There is no `secrets.py`; that pattern is retired.
+
+**Boot sequence (`main.py`):** checks for `/config.json` with a non-empty `wifi_ssid`. If missing or blank → portal mode. Otherwise → radar mode.
+
+**Portal mode (`portal.py` → `run()`):**
+
+- Broadcasts a WPA2 AP: SSID `mr-radar-setup`, passphrase derived from `machine.unique_id()` (12 hex chars, unique per device, stable across reboots).
+- Draws SSID, passphrase, and `192.168.4.1` on the round display so the user knows how to connect.
+- Serves a settings form at `http://192.168.4.1/`. On submit, saves `/config.json` and reboots.
+- To re-enter portal mode from the REPL: `import os; os.remove('/config.json')` then reset.
+
+**Radar mode (`main.py` → `radar.main()`):**
+
+- On startup, draws a "Connecting…" screen, then a "Connected" screen showing the settings URL (`http://<device-LAN-IP>`) and WiFi SSID. Holds for at least 20 seconds (or until first frame arrives, whichever is longer) so the user has time to note the settings URL.
+- Runs `portal.serve()` in a background thread (24 KB stack) — the same settings form, now reachable at the device's LAN IP while radar runs. Saving reboots the device; the browser auto-redirects back to `/` once the server is back up.
+- Station dropdown is populated from `GET /stations` on the renderer (HTTP/1.0 to avoid chunked encoding). Falls back to a text input if the renderer is unreachable.
+
+**`/config.json` schema:**
+
+```json
+{
+  "wifi_ssid": "your-network",
+  "wifi_password": "your-password",
+  "station": "KILN",
+  "renderer_url": "https://mr-radar.fly.dev",
+  "theme": "vintage",
+  "poll_seconds": 60
+}
+```
+
+**Display color notes (`radar.py`, `portal.py`):** The GC9A01 expects big-endian RGB565; `framebuf.FrameBuffer` on the ESP32 (little-endian) stores pixels little-endian. All colors passed to framebuf must be byte-swapped: `swapped = ((color & 0xFF) << 8) | (color >> 8)`. The pre-swapped constants in `radar.py` are named `_S_*` (e.g. `_S_GREEN = 0xE007` for big-endian `0x07E0`).
+
+**Thread layout in radar mode:**
+
+| Thread | Stack | Responsibility |
+| --- | --- | --- |
+| Main | default | Sweep animation + display ownership |
+| Fetch | 16–32 KB | `fetch_loop`: pulls `/frame` every 60 s |
+| Settings | 24 KB | `portal.serve`: HTTP settings server on :80 |
+
 ## Robustness expectations (non-negotiable for both halves)
 
-- **Firmware:** never hard-fault to a black screen on a transient error. Wrap the network loop in try/except, keep a "last known good frame," show a small status indicator (e.g. a corner dot: green=fresh, yellow=stale, red=offline), and use a watchdog so a hang self-recovers. WiFi creds, station ID, and endpoint URL are provisioned (e.g. captive-portal or config file), not hard-coded.
+- **Firmware:** never hard-fault to a black screen on a transient error. Wrap the network loop in try/except, keep a "last known good frame," show a small status indicator (e.g. a corner dot: green=fresh, yellow=stale, red=offline), and use a watchdog so a hang self-recovers. WiFi creds and all settings are stored in `/config.json`, provisioned via the captive portal or settings server — never hard-coded.
 - **Renderer:** stateless, no database; cache in memory only. Tolerate upstream outages and partial data. Be a polite upstream client (caching, backoff, User-Agent). Must run identically on the public instance, a free-tier PaaS, or a Raspberry Pi.
 
 ## Working conventions for agents
@@ -178,6 +220,40 @@ At zoom 7 the owner's location often falls near a tile edge, so a centered 240×
 - **Prefer small, reviewable changes.** This is hardware-adjacent; a bad firmware change costs a reflash. Favor incremental, testable steps.
 - **Validate hardware assumptions cheaply.** When touching display code, prefer a test-pattern path that proves wiring before layering on network complexity.
 
+## Firmware animation architecture
+
+The firmware runs a classic PPI (Plan Position Indicator) sweep animation. Understanding this is essential before touching any display or fetch code.
+
+**Two buffers, strict ownership:**
+
+- `src` — the last successfully fetched frame (bytearray, 115,200 bytes). Treat as read-only. The fetch thread writes a fresh `src` under a lock; the main thread only swaps it in at a rotation boundary.
+- `fb` (inside `sweep.Sweep`) — the live framebuffer. The sweep overlays the radar image with the sweep line and trail glow. Never blit `src` directly to the display after the first frame; always go through `fb`.
+
+**Per-frame render sequence** (`_render` in `radar.py`):
+
+1. `restore_trail()` — undo the previous trail glow from `fb`, using saved pre-blend values (does NOT need `src`).
+2. `restore_line(src)` — undo the previous AA sweep line from `fb` using `src`.
+3. `paint_wedge(src, a0, a1)` — copy radar pixels from `src` into the newly swept wedge.
+4. `paint_trail(az)` — blend the glow behind the sweep line into `fb`, saving pre-blend values for next frame's restore.
+5. `sweep_line(az)` — draw the bright AA sweep line.
+6. `blit_band(y0, y1)` — push only the dirty rectangle to the display via SPI.
+
+Frame swap (new `src` from the fetch thread) happens at the 360°→0° rotation boundary so the sweep never reads a partially-coherent frame.
+
+**SPI performance:** `SPI_BAUD = 40_000_000` (40 MHz). The GC9A01 supports 40–80 MHz. Do not lower this — it was briefly 20 MHz during bring-up and caused visible choppiness. `blit_band` blits only the dirty y-range (the trail bounding box) each frame, not the full 240×240.
+
+## MicroPython viper notes (hard-won)
+
+These are non-obvious constraints that bit us. Read before writing any `@micropython.viper` code.
+
+**`ptr32` + `array('i', ...)` is unreliable for storing data.** Using `ptr32` to write pixel offsets into an `array('i', ...)` and reading them back produces garbage in practice. Use `bytearray` and `ptr8` instead. If offsets are always even and fit in 16 bits (e.g., max `o//2 = 57599 < 65536` for a 240×240 RGB565 buffer), store them as little-endian uint16 pairs — two bytes per entry, read back with `px[i*2] | (px[i*2+1] << 8)`.
+
+**Save/restore of per-pixel data must restore in REVERSE order.** When multiple adjacent radials (0.5° apart) map to the same display pixel due to integer rounding, each radial appends a new save entry with whatever is currently in `fb`. Restoring forward leaves the pixel at the intermediate blended value from the second-to-last visit. Restoring in reverse (`for i in range(n-1, -1, -1)`) means the earliest save — which holds the true original value — wins. This is the correct fix; forward iteration produces a subtle but catastrophic accumulation of the glow color over time.
+
+**Performance split:** use `@micropython.native` for float trig (one `sin`/`cos` per radial, converted to 11-bit fixed-point integers), then pass those integers to a `@micropython.viper` inner loop that does pure integer arithmetic with `ptr8` raw buffer access. Float boxing inside a viper loop kills framerate. Module-level integer constants (e.g. `_MAX_TRAIL_PX`) are accessible in viper via `int(CONSTANT)`, but storing them as instance variables (`self._trail_cap`) is safer and equally fast.
+
+**mpremote session chaining:** use `mpremote connect /dev/ttyACM0 cp a :a + cp b :b + run c.py` to upload multiple files and run in a single session. Separate `mpremote` invocations each open/close the port and are slower; if another process holds `/dev/ttyACM0`, use `fuser /dev/ttyACM0` to find and kill it.
+
 ## Build status & suggested next steps
 
 **Done:**
@@ -186,10 +262,14 @@ At zoom 7 the owner's location often falls near a tile edge, so a centered 240×
 2. ✅ MicroPython flashed; REPL over serial verified (ESP32-S3-Zero).
 3. ✅ Display bring-up: vendored GC9A01 driver (`gc9a01py.py`) + test pattern; wiring proven on the S3-Zero.
 4. ✅ Firmware client loop (`radar.py`): WiFi + `GET /frame?station=KILN&fmt=rgb565` + blit + sleep, tested end-to-end against the renderer.
+5. ✅ PPI sweep animation (`sweep.py`): clock-driven radial sweep with anti-aliased line, persistence glow trail (20° behind the sweep, quadratic alpha ramp), dirty-rect band blit. Tested at ~22 fps.
+6. ✅ Provisioning: captive-portal AP (`portal.py`) on first boot; WPA2 passphrase derived from chip ID; settings drawn on display. Config stored in `/config.json`; `secrets.py` retired.
+7. ✅ Boot status screen: "Connecting…" → "Connected" with settings URL and SSID; holds ≥20 s or until first frame.
+8. ✅ In-radar settings server: `portal.serve()` runs on :80 in a background thread; station list populated as a dropdown from `/stations`; browser redirects back after reboot.
 
 **Remaining:**
 
-1. Robustness pass: last-good-frame, status indicator, watchdog, provisioning (currently a plain `secrets.py`).
-2. Polish: JPEG transport, OTA, animated loop (renderer-driven). (Backlight dimming is *not* possible on the current display module — its backlight is hardwired on; would require a different module or a hardware mod.)
+1. Robustness pass: last-good-frame, status indicator (corner dot: green/yellow/red), watchdog timer.
+2. Polish: JPEG transport, OTA. (Backlight dimming is *not* possible on the current display module — its backlight is hardwired on; would require a different module or a hardware mod.)
 
 Enclosure is out of scope here.

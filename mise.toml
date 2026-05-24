@@ -1,3 +1,4 @@
 [tools]
+flyctl = "latest"
 python = "latest"
 uv = "latest"
