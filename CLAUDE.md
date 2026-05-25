@@ -245,6 +245,8 @@ The firmware runs a classic PPI (Plan Position Indicator) sweep animation. Under
 
 **Clock overlay:** `_paint_clock` bakes a 2×-scaled (16 px tall) HH:MM timestamp directly into `src` once per minute — no per-frame cost. The text has no background; radar imagery shows through the gaps. `_clock_str` adds 15 seconds to the wall time so the text updates at second 45 (180°, 9 o'clock), which is 15 seconds before the sweep reveals the 12 o'clock area at second 0. When a new frame arrives from the fetch thread, `_stamp_clock_pixels` re-bakes the current cached text into the new `src` immediately.
 
+`_stamp_clock_pixels` always saves the original `src` values at each clock pixel position into `_CLOCK_SAVE_BUF` before overwriting them. When the minute changes, `_unstamp_clock_pixels` restores those saved values first, erasing the old text cleanly before the new text is stamped. This prevents ghosting (old digit pixels persisting under new ones) across minute boundaries. Because `_stamp_clock_pixels` is also called on each new radar frame, `_CLOCK_SAVE_BUF` always reflects the current frame's radar data at the clock positions.
+
 Frame swap (new `src` from the fetch thread) happens at the 360°→0° rotation boundary (second 15, 3 o'clock) so the sweep never reads a partially-coherent frame.
 
 **SPI performance:** `SPI_BAUD = 40_000_000` (40 MHz). The GC9A01 supports 40–80 MHz. Do not lower this — it was briefly 20 MHz during bring-up and caused visible choppiness. `blit_band` blits only the dirty y-range (the trail bounding box) each frame, not the full 240×240.

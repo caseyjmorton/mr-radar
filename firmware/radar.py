@@ -58,8 +58,10 @@ _CLOCK_TEXT_Y  = 26    # keeps text at same visual position as before
 # Cache is rebuilt once per minute; _stamp_clock_pixels writes ~640 pixels per frame.
 _CLOCK_RND     = bytearray(_CLOCK_RND_W * _CLOCK_RND_H * 2)
 _CLOCK_TMP     = framebuf.FrameBuffer(_CLOCK_RND, _CLOCK_RND_W, _CLOCK_RND_H, framebuf.RGB565)
-_CLOCK_PX_BUF  = bytearray(_CLOCK_TEXT_W * _CLOCK_TEXT_H * 4)  # (off_lo, off_hi, b0, b1)
+_CLOCK_PX_BUF   = bytearray(_CLOCK_TEXT_W * _CLOCK_TEXT_H * 4)  # (off_lo, off_hi, b0, b1)
+_CLOCK_SAVE_BUF = bytearray(_CLOCK_TEXT_W * _CLOCK_TEXT_H * 4)  # saved src values at those offsets
 _CLOCK_PX_N    = 0
+_CLOCK_SAVE_N  = 0
 _CLOCK_LAST_STR = None   # cached time string; rebuild pixel cache only when this changes
 
 
@@ -104,13 +106,30 @@ def _try_ntp():
 
 
 @micropython.native
-def _stamp_clock_pixels(fb):
+def _unstamp_clock_pixels(src):
+    sv = _CLOCK_SAVE_BUF
+    n = _CLOCK_SAVE_N
+    for i in range(n):
+        off = sv[i * 4] | (sv[i * 4 + 1] << 8)
+        src[off]     = sv[i * 4 + 2]
+        src[off + 1] = sv[i * 4 + 3]
+
+
+@micropython.native
+def _stamp_clock_pixels(src):
+    global _CLOCK_SAVE_N
     px = _CLOCK_PX_BUF
+    sv = _CLOCK_SAVE_BUF
     n = _CLOCK_PX_N
     for i in range(n):
         off = px[i * 4] | (px[i * 4 + 1] << 8)
-        fb[off]     = px[i * 4 + 2]
-        fb[off + 1] = px[i * 4 + 3]
+        sv[i * 4]     = px[i * 4]
+        sv[i * 4 + 1] = px[i * 4 + 1]
+        sv[i * 4 + 2] = src[off]
+        sv[i * 4 + 3] = src[off + 1]
+        src[off]     = px[i * 4 + 2]
+        src[off + 1] = px[i * 4 + 3]
+    _CLOCK_SAVE_N = n
 
 
 def _paint_clock(fb, time_str):
@@ -122,6 +141,7 @@ def _paint_clock(fb, time_str):
         _clock_logged = True
     try:
         if time_str != _CLOCK_LAST_STR:
+            _unstamp_clock_pixels(fb)    # restore src pixels overwritten by old clock
             _CLOCK_TMP.fill(_CLOCK_BG)
             _CLOCK_TMP.text(time_str, 0, 0, _CLOCK_COLOR)
             n = 0
