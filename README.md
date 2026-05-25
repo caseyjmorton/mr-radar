@@ -95,6 +95,17 @@ docker build -t mr-radar-renderer renderer/
 docker run -p 3000:3000 mr-radar-renderer
 ```
 
+## Clock & timezone
+
+Along with the radar, the display shows the current time as **HH:MM** at the top of the dial (the 12 o'clock position, just as the sweep passes it). The time is kept accurate over NTP, so you never set it by hand — you only tell the device your timezone.
+
+Two related settings, both configurable in the device's setup page (the `mr-radar-setup` WiFi portal on first boot, and the device's own address on your network after that):
+
+- **UTC offset** — your timezone as hours from UTC. With DST auto-adjust **off**, this is the exact offset you want. With it **on**, use your *standard-time* offset (−5 Eastern, −6 Central, −7 Mountain, −8 Pacific).
+- **Daylight Saving Time** — when enabled, the device adds an hour automatically while US daylight saving is in effect (02:00 on the 2nd Sunday of March through 02:00 on the 1st Sunday of November) and rolls the clock over on its own at each transition — no reboot needed. Leave it off where DST isn't observed (Arizona, Hawaii, Puerto Rico, Guam) and just set the offset directly.
+
+The timezone affects only the displayed clock; the radar sweep is aligned to real wall-clock seconds and looks the same regardless.
+
 ## Renderer API
 
 ### `GET /frame`
