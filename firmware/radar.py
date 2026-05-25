@@ -23,8 +23,15 @@ import sweep
 
 FRAME_BYTES = 240 * 240 * 2   # rgb565, exactly 115200 bytes
 ROTATION_MS = 60000           # one 360-degree sweep per minute
-TARGET_MS = 100               # min frame period (~10 fps cap); speed is clock-driven
+TARGET_MS = 40                # min frame period (~25 fps cap); speed is clock-driven
 STATUS_MS  = 20_000           # minimum time to show the connection status screen
+# Frame fetches are kicked off when the wall clock reaches this second-within-minute,
+# which is the sweep at 9 o'clock (180 deg). That leaves ~30 s before the rotation-
+# boundary swap at second 15, so the throttled download finishes with margin to spare.
+FETCH_TRIGGER_SEC = 45
+FETCH_CHUNK       = 1024      # bytes per socket read while downloading a frame
+FETCH_THROTTLE_MS = 80        # sleep between read chunks so the download never starves
+                              # the render thread (spreads ~115 KB across ~10 s)
 
 _lock = _thread.allocate_lock()
 _latest = None                # most recent good frame (bytearray), or None
@@ -212,10 +219,11 @@ def parse_url(url):
     return host, int(port) if port else default_port, ("/" + path).rstrip("/"), tls
 
 
-def fetch_frame(host, port, base, tls):
-    theme = getattr(secrets, "THEME", "vintage")
-    path = "{}/frame?station={}&fmt=rgb565&theme={}".format(
-        base, secrets.STATION, theme)
+def open_conn(host, port, tls):
+    # Establish a (TLS) connection. The TLS handshake is ~600-800 ms of GIL-held
+    # crypto on this MCU, so this is the expensive step the sweep must never wait on:
+    # it runs once at startup (before the sweep) and only again on reconnect.
+    t = time.ticks_ms()
     addr = socket.getaddrinfo(host, port)[0][-1]
     s = socket.socket()
     try:
@@ -224,59 +232,107 @@ def fetch_frame(host, port, base, tls):
             # fly.io shares IPs across apps, so SNI (server_hostname) is required.
             # Cert is unverified - fine for public radar imagery.
             s = ssl.wrap_socket(s, server_hostname=host)
-        s.write("GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n"
-                .format(path, host).encode())
-        head = b""
-        while b"\r\n\r\n" not in head:
-            chunk = s.read(256)
-            if not chunk:
-                raise OSError("closed before headers")
-            head += chunk
-        split = head.index(b"\r\n\r\n") + 4
-        header, body = head[:split], head[split:]
-        if int(header.split(b" ", 2)[1]) != 200:
-            raise OSError("HTTP error")
-
-        buf = bytearray(FRAME_BYTES)
-        mv = memoryview(buf)
-        n = len(body)
-        mv[0:n] = body
-        while n < FRAME_BYTES:
-            chunk = s.read(1024)
-            if not chunk:
-                break
-            c = len(chunk)
-            if n + c > FRAME_BYTES:
-                c = FRAME_BYTES - n
-            mv[n:n + c] = chunk[:c]
-            n += c
-            time.sleep_ms(0)          # yield so the sweep keeps animating
-        if n != FRAME_BYTES:
-            raise OSError("short frame %d" % n)
-        return buf
-    finally:
+    except Exception:
         s.close()
+        raise
+    print("conn: opened in", time.ticks_diff(time.ticks_ms(), t), "ms")
+    return s
+
+
+def fetch_over(s, host, base, throttle_ms=0):
+    # Send one keep-alive GET on an already-open socket and read exactly one frame.
+    # No handshake here, so the steady-state per-minute fetch never freezes the sweep.
+    # The body read is capped to the remaining frame bytes so it never consumes into
+    # the next keep-alive response.
+    theme = getattr(secrets, "THEME", "vintage")
+    path = "{}/frame?station={}&fmt=rgb565&theme={}".format(
+        base, secrets.STATION, theme)
+    s.write("GET {} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n\r\n"
+            .format(path, host).encode())
+    head = b""
+    while b"\r\n\r\n" not in head:
+        chunk = s.read(256)
+        if not chunk:
+            raise OSError("closed before headers")
+        head += chunk
+    split = head.index(b"\r\n\r\n") + 4
+    header, body = head[:split], head[split:]
+    if int(header.split(b" ", 2)[1]) != 200:
+        raise OSError("HTTP error")
+
+    buf = bytearray(FRAME_BYTES)
+    mv = memoryview(buf)
+    n = len(body)
+    if n > FRAME_BYTES:
+        n = FRAME_BYTES
+    mv[0:n] = body[:n]
+    while n < FRAME_BYTES:
+        chunk = s.read(min(FETCH_CHUNK, FRAME_BYTES - n))
+        if not chunk:
+            raise OSError("short frame %d" % n)
+        c = len(chunk)
+        mv[n:n + c] = chunk
+        n += c
+        time.sleep_ms(throttle_ms)  # spread I/O so the sweep keeps animating
+    return buf
 
 
 def fetch_loop(host, port, base, tls):
     # Build each frame in a fresh buffer, then swap the shared reference under the
     # lock. The animation thread only ever reads a fully-built buffer, so there is
     # no tearing and the lock is held for just the pointer swap.
+    #
+    # The TLS connection is kept open across fetches (HTTP keep-alive) so the costly
+    # handshake happens once at startup, not on every poll. A stale keep-alive socket
+    # (server closed it during the idle gap) is detected on use and reopened once.
+    #
+    # Timing: the first frame is fetched immediately (unthrottled) so the sweep can
+    # start without a long blank. After that, each fetch is kicked off when the wall
+    # clock hits FETCH_TRIGGER_SEC (the sweep at 9 o'clock / 180 deg) and throttled
+    # across ~10 s, landing the new frame well before the rotation swap at second 15.
     global _latest
+    s = None
+    first = True
+    fetched = False
     while True:
         try:
-            if not network.WLAN(network.STA_IF).isconnected():
-                connect_wifi()
-            buf = fetch_frame(host, port, base, tls)
-            _lock.acquire()
-            try:
-                _latest = buf
-            finally:
-                _lock.release()
-            print("fetch: new frame")
+            sec = int(time.time()) % 60
+            if first or (sec == FETCH_TRIGGER_SEC and not fetched):
+                if not network.WLAN(network.STA_IF).isconnected():
+                    connect_wifi()
+                    if s is not None:
+                        try: s.close()
+                        except Exception: pass
+                        s = None
+                throttle = 0 if first else FETCH_THROTTLE_MS
+                if s is None:
+                    s = open_conn(host, port, tls)
+                try:
+                    buf = fetch_over(s, host, base, throttle)
+                except Exception:
+                    # Stale keep-alive socket: reopen once (one handshake) and retry.
+                    try: s.close()
+                    except Exception: pass
+                    s = open_conn(host, port, tls)
+                    buf = fetch_over(s, host, base, throttle)
+                _lock.acquire()
+                try:
+                    _latest = buf
+                finally:
+                    _lock.release()
+                fetched = True
+                first = False
+                print("fetch: new frame")
+            elif sec != FETCH_TRIGGER_SEC:
+                fetched = False     # rearm once the trigger second has passed
         except Exception as e:
             print("fetch error:", e)
-        time.sleep(ROTATION_MS // 1000)
+            fetched = False
+            if s is not None:
+                try: s.close()
+                except Exception: pass
+                s = None
+        time.sleep_ms(200)
 
 
 def _render(scope, tft, src, a0, a1):

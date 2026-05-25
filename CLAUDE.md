@@ -155,9 +155,11 @@ Do not add a database or filesystem cache. Stateless in-memory cache is sufficie
 
 Decouple the two timers:
 - **Renderer** refreshes its cached composite every ~2-3 min, re-compositing only when RainViewer publishes a new frame. One shared cache serves all devices, keeping upstream request volume flat regardless of device count.
-- **Device** may poll every 1-2 min for a "live" feel, but it polls the renderer, not upstream. Since the cached image only changes when upstream does, frequent polling wastes nothing meaningful.
+- **Device** polls the renderer (not upstream) once per minute. The fetch is kicked off when the wall clock hits `FETCH_TRIGGER_SEC` (second 45 = sweep at 9 o'clock / 180°), giving ~30 s to download before the rotation-boundary frame swap at second 15. Since the cached image only changes when upstream does, this polling wastes nothing meaningful.
 
 Do not have the device poll upstream providers. Do not have the renderer re-fetch upstream on every device request.
+
+**Keep-alive fetch (firmware):** the TLS handshake costs ~600–800 ms of GIL-held crypto on this MCU, which would freeze the sweep once per poll. So `fetch_loop` opens the (TLS) connection **once** (`open_conn`, during startup before the sweep runs) and reuses it for every subsequent poll via HTTP keep-alive (`fetch_over` sends `Connection: keep-alive` and reads exactly one frame, capping the body read so it never consumes into the next response). A stale socket (server closed it during the idle gap) is detected on use and reopened once. Verified that the public renderer holds the idle connection across the ~50 s between polls, so steady-state fetches do zero handshakes. The body read is throttled (`FETCH_THROTTLE_MS`, sleep between `FETCH_CHUNK`-byte reads) to spread the ~115 KB over ~10 s so it never starves the render thread. `open_conn` prints `conn: opened in N ms`, which only fires on startup or a reconnect — useful as a reconnect signal.
 
 ## Tile math note
 
@@ -205,7 +207,7 @@ Configuration lives in `/config.json` on the device's LittleFS. There is no `sec
 | Thread | Stack | Responsibility |
 | --- | --- | --- |
 | Main | default | Sweep animation + display ownership |
-| Fetch | 16–32 KB | `fetch_loop`: pulls `/frame` every 60 s |
+| Fetch | 16–32 KB | `fetch_loop`: keep-alive `/frame` poll, kicked off at second 45 |
 | Settings | 24 KB | `portal.serve`: HTTP settings server on :80 |
 
 ## Robustness expectations (non-negotiable for both halves)
@@ -222,6 +224,7 @@ Configuration lives in `/config.json` on the device's LittleFS. There is no `sec
 - **Cite the constraints, don't relitigate them.** The architecture split exists for hard reasons (device RAM, no on-device PNG decode, provider ToS). Don't propose on-device compositing or homelab-dependence without explicitly raising it as a constraint change first.
 - **Prefer small, reviewable changes.** This is hardware-adjacent; a bad firmware change costs a reflash. Favor incremental, testable steps.
 - **Validate hardware assumptions cheaply.** When touching display code, prefer a test-pattern path that proves wiring before layering on network complexity.
+- **Keep the device in sync with local firmware.** Whenever possible, after editing a firmware file, copy it to the device so the on-device code matches the working tree (e.g. `mpremote connect /dev/ttyACM0 cp <file> :<file>`). A stale device silently tests old code. Before relying on a device test, confirm every firmware file you changed has been uploaded; when validating viper changes specifically, force a fresh import (`del sys.modules['sweep']` then re-import, or soft-reset) since `import` returns the cached old module otherwise.
 
 ## Firmware animation architecture
 
@@ -249,9 +252,13 @@ The firmware runs a classic PPI (Plan Position Indicator) sweep animation. Under
 
 Frame swap (new `src` from the fetch thread) happens at the 360°→0° rotation boundary (second 15, 3 o'clock) so the sweep never reads a partially-coherent frame.
 
+**Frame rate:** `TARGET_MS = 40` in `radar.py` caps the loop at ~25 fps (the sweep speed itself is wall-clock driven, so the cap only bounds how often it redraws). The loop sleeps only the remainder after the render, so render work below 40 ms costs nothing extra. It was 100 ms (~10 fps) during bring-up; 40 ms is comfortably within the render budget after the viper work below.
+
 **SPI performance:** `SPI_BAUD = 40_000_000` (40 MHz). The GC9A01 supports 40–80 MHz. Do not lower this — it was briefly 20 MHz during bring-up and caused visible choppiness. `blit_band` blits only the dirty y-range (the trail bounding box) each frame, not the full 240×240.
 
-**`paint_trail` trig optimization:** The trail glow calls `_blend_radial` for each of the 40 trail steps. Naively that is 80 `sin`/`cos` calls per frame. Instead, relative-angle tables (`_TRAIL_REL_COS`, `_TRAIL_REL_SIN`) are precomputed at module import and the angle-addition identity `sin(az+rel) = sin(az)cos(rel) + cos(az)sin(rel)` is used inside `paint_trail`, reducing the hot path to 2 trig calls per frame.
+**`paint_trail` trig optimization:** The trail glow covers 40 radials. Relative-angle tables (`_TRAIL_REL_COS`, `_TRAIL_REL_SIN`) are precomputed at module import and the angle-addition identity `sin(az+rel) = sin(az)cos(rel) + cos(az)sin(rel)` reduces the per-frame trig to 2 calls. `paint_trail` (native) packs each step's direction vector (`sa_fp+2048`, `ca_fp+2048` as LE uint16 pairs) into `_trail_dirs`, then a single `_blend_trail_all_viper()` call paints all 40 radials in one pass — collapsing what used to be ~40 native→viper transitions per frame into one.
+
+**AA sweep line (`_aa_radial` + `_aa_line_viper`):** `_aa_radial` (native) does the float prep — trig, one divide for the slope, and `pscale` (the perpendicular-distance normalizer, which is exactly `|cos|` for an x-major line and `|sin|` for a y-major one, so **no `sqrt` is needed**) — stashes the prepped fixed-point values on `self`, then calls the viper loop. `_aa_line_viper` does the per-pixel coverage in pure integer math: coverage is prescaled to a 0–256 alpha range (`av = _AA_C0 - perp_dist*256`), and the fp16 minor-axis distance is dropped to fp8 before multiplying by `pscale` (fp8) so the product stays inside 32-bit signed. Touched offsets are recorded as `o//2` LE uint16 pairs in `_line_px` for `restore_line()`.
 
 ## MicroPython viper notes (hard-won)
 
@@ -261,9 +268,17 @@ These are non-obvious constraints that bit us. Read before writing any `@micropy
 
 **Save/restore of per-pixel data must restore in REVERSE order.** When multiple adjacent radials (0.5° apart) map to the same display pixel due to integer rounding, each radial appends a new save entry with whatever is currently in `fb`. Restoring forward leaves the pixel at the intermediate blended value from the second-to-last visit. Restoring in reverse (`for i in range(n-1, -1, -1)`) means the earliest save — which holds the true original value — wins. This is the correct fix; forward iteration produces a subtle but catastrophic accumulation of the glow color over time.
 
-**Performance split:** use `@micropython.native` for float trig (one `sin`/`cos` per radial, converted to 11-bit fixed-point integers), then pass those integers to a `@micropython.viper` inner loop that does pure integer arithmetic with `ptr8` raw buffer access. Float boxing inside a viper loop kills framerate. Module-level integer constants (e.g. `_MAX_TRAIL_PX`) are accessible in viper via `int(CONSTANT)`, but storing them as instance variables (`self._trail_cap`) is safer and equally fast.
+**Performance split:** use `@micropython.native` for float trig (one `sin`/`cos` per radial, converted to fixed-point integers), then pass those integers to a `@micropython.viper` inner loop that does pure integer arithmetic with `ptr8` raw buffer access. Float boxing inside a viper loop kills framerate. Module-level integer constants (e.g. `_MAX_TRAIL_PX`) are accessible in viper via `int(CONSTANT)`, but storing them as instance variables (`self._trail_cap`) is safer and equally fast.
+
+**Batch native→viper transitions; keep viper arg counts low.** Calling a viper function in a tight Python loop (e.g. once per trail radial) pays the native→viper transition cost every iteration. Prefer packing the per-iteration inputs into a buffer (native loop) and doing the whole batch in one viper call (see `paint_trail` → `_blend_trail_all_viper`). When a viper function needs many inputs, stash them as instance attributes and read them with `int(self._x)` at the top of the function rather than passing a long argument list — the existing viper functions all take 0–3 args, and that is the proven-safe shape on this port.
+
+**Pack signed fixed-point into unsigned slots with a bias.** `ptr8`/`ptr16` reads are unsigned. To carry a signed fixed-point value (e.g. `sin*2048` in [-2048, 2048]) through a `ptr8` buffer, add a bias on the way in (`+2048`, giving [0, 4096], fits in uint16 LE pairs) and subtract it back inside the viper. See `paint_trail`/`_blend_trail_all_viper`.
 
 **mpremote session chaining:** use `mpremote connect /dev/ttyACM0 cp a :a + cp b :b + run c.py` to upload multiple files and run in a single session. Separate `mpremote` invocations each open/close the port and are slower; if another process holds `/dev/ttyACM0`, use `fuser /dev/ttyACM0` to find and kill it.
+
+**Validating viper without booting the app:** `mpremote ... cp sweep.py :sweep.py + exec "<test>"` runs a quick smoke test. Force a fresh import first (`import sys; [sys.modules.pop(x) for x in [k for k in sys.modules if 'sweep' in k]]`) or `import` returns the cached old module and you silently test stale code. Constructing the object and calling each viper path once at several angles surfaces compile/type/overflow errors immediately.
+
+**`mpremote soft-reset` parks at the REPL — it does NOT run `main.py`.** After a soft-reset, mpremote holds the board in the REPL so `main.py` cannot interfere; to actually cold-boot the app standalone, use `mpremote connect /dev/ttyACM0 reset` (hardware reset). Note that a hardware reset re-enumerates USB-CDC, so `/dev/ttyACM0` may briefly change. To capture serial from a running app, prefer `mpremote exec` (synchronous, captures prints) over opening the raw port with pyserial — pyserial toggles DTR/RTS on open, which can disturb the board.
 
 ## Build status & suggested next steps
 
@@ -273,12 +288,14 @@ These are non-obvious constraints that bit us. Read before writing any `@micropy
 2. ✅ MicroPython flashed; REPL over serial verified (ESP32-S3-Zero).
 3. ✅ Display bring-up: vendored GC9A01 driver (`gc9a01py.py`) + test pattern; wiring proven on the S3-Zero.
 4. ✅ Firmware client loop (`radar.py`): WiFi + `GET /frame?station=KILN&fmt=rgb565` + blit + sleep, tested end-to-end against the renderer.
-5. ✅ PPI sweep animation (`sweep.py`): clock-driven radial sweep with anti-aliased line, persistence glow trail (20° behind the sweep, quadratic alpha ramp), dirty-rect band blit. Tested at ~22 fps.
+5. ✅ PPI sweep animation (`sweep.py`): clock-driven radial sweep with anti-aliased line, persistence glow trail (20° behind the sweep, quadratic alpha ramp), dirty-rect band blit.
 6. ✅ Provisioning: captive-portal AP (`portal.py`) on first boot; WPA2 passphrase derived from chip ID; settings drawn on display. Config stored in `/config.json`; `secrets.py` retired.
 7. ✅ Boot status screen: "Connecting…" → "Connected" with settings URL and SSID; holds ≥20 s or until first frame.
 8. ✅ In-radar settings server: `portal.serve()` runs on :80 in a background thread; station list populated as a dropdown from `/stations`; browser redirects back after reboot.
 9. ✅ NTP clock overlay: HH:MM at 12 o'clock, 2× scaled (16 px), no background. Baked into `src` once per minute at second 45 so correct time is visible when the sweep crosses 12 o'clock at second 0. `tz_offset` (hours) configurable in the settings form.
 10. ✅ Wall-clock sweep alignment: second 0 = 12 o'clock (top); sweep proceeds clockwise; rotation boundary (frame swap) at second 15 (3 o'clock). Sub-second interpolation via `ticks_ms()` boundary tracking for smooth motion.
+11. ✅ Sweep smoothness pass: frame cap raised to ~25 fps (`TARGET_MS = 40`); trail glow batched into one viper call per frame (`_blend_trail_all_viper`); AA sweep line moved to a fixed-point viper loop (`_aa_line_viper`, no `sqrt`).
+12. ✅ Keep-alive fetch: one TLS handshake at startup, reused across polls; fetch kicked off at second 45 (9 o'clock) and throttled across ~10 s — eliminates the once-per-minute ~700 ms handshake freeze.
 
 **Remaining:**
 

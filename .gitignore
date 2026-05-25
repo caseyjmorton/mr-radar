@@ -3,3 +3,9 @@ node_modules/
 
 # Device provisioning - real WiFi creds / station / renderer URL
 firmware/secrets.py
+
+# MicroPython firmware images - downloaded from micropython.org, not vendored
+firmware/*.bin
+
+# Python bytecode cache from local syntax checks
+__pycache__/
