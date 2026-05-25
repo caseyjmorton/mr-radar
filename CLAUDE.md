@@ -194,11 +194,16 @@ Configuration lives in `/config.json` on the device's LittleFS. There is no `sec
   "renderer_url": "https://mr-radar.fly.dev",
   "theme": "vintage",
   "poll_seconds": 60,
-  "tz_offset": -5
+  "tz_offset": -5,
+  "dst": true
 }
 ```
 
-`tz_offset` is a float, hours offset from UTC (e.g. -5 for Eastern, -8 for Pacific). Used for both the clock display and the wall-clock sweep position. Configurable from the settings form in both portal mode and STA mode.
+`tz_offset` is a float, hours offset from UTC. When `dst` is `false` it is the actual offset you want; when `dst` is `true` it is the **standard-time** offset (e.g. -5 Eastern, -8 Pacific, -7 Mountain) and the firmware adds one hour automatically while US daylight saving is in effect.
+
+`dst` (boolean, default `false`) enables automatic US DST adjustment (02:00 on the 2nd Sunday of March → 02:00 on the 1st Sunday of November). NEXRAD is US-only so US rules are the right scope; regions that don't observe DST (Arizona, Hawaii, Puerto Rico, Guam) simply leave it off. The adjustment is recomputed every minute in `_clock_str` (`_is_us_dst` / `_nth_sunday`), so the clock rolls over at the transition without a reboot. **DST only affects the displayed clock, never the sweep** — the sweep keys off seconds-within-minute, which a whole-hour shift leaves unchanged.
+
+Both are configurable from the settings form in portal mode and STA mode.
 
 **Display color notes (`radar.py`, `portal.py`):** The GC9A01 expects big-endian RGB565; `framebuf.FrameBuffer` on the ESP32 (little-endian) stores pixels little-endian. All colors passed to framebuf must be byte-swapped: `swapped = ((color & 0xFF) << 8) | (color >> 8)`. The pre-swapped constants in `radar.py` are named `_S_*` (e.g. `_S_GREEN = 0xE007` for big-endian `0x07E0`).
 

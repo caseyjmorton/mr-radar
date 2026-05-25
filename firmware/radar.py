@@ -175,12 +175,37 @@ def _paint_clock(fb, time_str):
         print("clock paint:", e)
 
 
-def _clock_str(tz_secs):
+def _nth_sunday(year, month, n):
+    # Day-of-month of the nth Sunday in (year, month). localtime()[6]: 0=Mon..6=Sun.
+    wd = time.localtime(time.mktime((year, month, 1, 0, 0, 0, 0, 0)))[6]
+    return 1 + (6 - wd) + (n - 1) * 7
+
+
+def _is_us_dst(tm):
+    # US DST: 02:00 on the 2nd Sunday of March .. 02:00 on the 1st Sunday of November.
+    # tm is a local *standard*-time tuple. DST is a whole-hour shift, so it only ever
+    # affects the displayed clock, never the sweep (which keys off seconds-in-minute).
+    y, mo, d, hr = tm[0], tm[1], tm[2], tm[3]
+    if mo < 3 or mo > 11:
+        return False
+    if mo > 3 and mo < 11:
+        return True
+    if mo == 3:                       # spring forward at 02:00 standard
+        start = _nth_sunday(y, 3, 2)
+        return d > start or (d == start and hr >= 2)
+    end = _nth_sunday(y, 11, 1)       # fall back at 02:00 daylight = 01:00 standard
+    return d < end or (d == end and hr < 1)
+
+
+def _clock_str(tz_secs, dst=False):
     if not _ntp_synced:
         return "--:--"
+    t = time.time() + tz_secs                       # local standard time
+    if dst and _is_us_dst(time.localtime(t)):
+        t += 3600                                    # add the daylight hour
     # Add 15 s so the text updates at second 45 (270° = 12 o'clock), the exact moment
     # the sweep reveals the top of the display — 15 s before the rotation boundary.
-    lt = time.localtime(time.time() + tz_secs + 15)
+    lt = time.localtime(t + 15)
     return "%02d:%02d" % (lt[3], lt[4])
 
 
@@ -350,6 +375,7 @@ def main():
     boot_ms = time.ticks_ms()
 
     tz_secs = int(getattr(secrets, 'TZ_OFFSET', 0) * 3600)
+    dst = bool(getattr(secrets, 'DST', False))
 
     _draw_status(tft, secrets.WIFI_SSID, None, 'Connecting...', _S_YELLOW)
     wlan = connect_wifi()
@@ -382,13 +408,13 @@ def main():
             break
         time.sleep_ms(100)
 
-    _paint_clock(src, _clock_str(tz_secs))   # bake clock into the source frame
+    _paint_clock(src, _clock_str(tz_secs, dst))   # bake clock into the source frame
     scope.show_frame(tft, src)
     print("status screen done; starting sweep")
 
     pending = None
     start = time.ticks_ms()
-    last_time_str = _clock_str(tz_secs)
+    last_time_str = _clock_str(tz_secs, dst)
     if _ntp_synced:
         prev = (float((time.time() + tz_secs) % 60) * 6.0 + 270.0) % 360.0
         _ntp_wall_sec = time.time() + tz_secs   # wall second at last ticks capture
@@ -423,7 +449,7 @@ def main():
         else:
             cur = (time.ticks_diff(t0, start) % ROTATION_MS) * 360.0 / ROTATION_MS
 
-        time_str = _clock_str(tz_secs)
+        time_str = _clock_str(tz_secs, dst)
         if time_str != last_time_str:
             _paint_clock(src, time_str)   # bake new time into current source frame
             last_time_str = time_str

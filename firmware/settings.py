@@ -9,6 +9,7 @@ _DEFAULTS = {
     'theme':        'vintage',
     'poll_seconds': 60,
     'tz_offset':    0,
+    'dst':          False,
 }
 
 
@@ -31,3 +32,4 @@ RENDERER_URL = _c['renderer_url']
 THEME        = _c['theme']
 POLL_SECONDS = _c['poll_seconds']
 TZ_OFFSET    = float(_c.get('tz_offset', 0))
+DST          = bool(_c.get('dst', False))

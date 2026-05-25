@@ -17,6 +17,7 @@ _DEFAULTS = {
     'theme':        'vintage',
     'poll_seconds': 60,
     'tz_offset':    0,
+    'dst':          False,
 }
 
 # Markers like _SSID_ are replaced at render time to avoid format-string issues
@@ -59,8 +60,12 @@ _STATION_INPUT_
 </div>
 <label>Poll interval (seconds, 10&#8211;600)</label>
 <input name="poll_seconds" type="number" min="10" max="600" value="_POLL_SECONDS_">
-<label>UTC Offset (hours) &mdash; sets clock display &amp; sweep position (e.g. -5 Eastern, -8 Pacific)</label>
+<label>UTC Offset (hours, standard time) &mdash; e.g. -5 Eastern, -8 Pacific, -7 Mountain</label>
 <input name="tz_offset" type="number" min="-12" max="14" step="0.5" value="_TZ_OFFSET_">
+<label>Daylight Saving Time</label>
+<div class="radios">
+<label><input type="checkbox" name="dst" value="1"_DST_SEL_> Auto-adjust (US rules)</label>
+</div>
 <button type="submit">Save &amp; Reboot</button>
 </form></body></html>"""
 
@@ -195,6 +200,7 @@ def _render_form(cfg, stations=None):
     h = h.replace('_VIN_SEL_', ' checked' if cfg['theme'] == 'vintage' else '')
     h = h.replace('_POLL_SECONDS_', str(cfg['poll_seconds']))
     h = h.replace('_TZ_OFFSET_', str(cfg.get('tz_offset', 0)))
+    h = h.replace('_DST_SEL_', ' checked' if cfg.get('dst') else '')
     return h
 
 
@@ -255,6 +261,7 @@ def _handle(conn, cfg):
                 'theme':        form.get('theme', 'modern'),
                 'poll_seconds': int(form.get('poll_seconds', 60)),
                 'tz_offset':    max(-12.0, min(14.0, float(form.get('tz_offset', 0)))),
+                'dst':          'dst' in form,
             }
             _save_config(saved_cfg)
             _respond(conn, '200 OK', _SAVED_HTML)
