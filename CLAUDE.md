@@ -191,9 +191,12 @@ Configuration lives in `/config.json` on the device's LittleFS. There is no `sec
   "station": "KILN",
   "renderer_url": "https://mr-radar.fly.dev",
   "theme": "vintage",
-  "poll_seconds": 60
+  "poll_seconds": 60,
+  "tz_offset": -5
 }
 ```
+
+`tz_offset` is a float, hours offset from UTC (e.g. -5 for Eastern, -8 for Pacific). Used for both the clock display and the wall-clock sweep position. Configurable from the settings form in both portal mode and STA mode.
 
 **Display color notes (`radar.py`, `portal.py`):** The GC9A01 expects big-endian RGB565; `framebuf.FrameBuffer` on the ESP32 (little-endian) stores pixels little-endian. All colors passed to framebuf must be byte-swapped: `swapped = ((color & 0xFF) << 8) | (color >> 8)`. The pre-swapped constants in `radar.py` are named `_S_*` (e.g. `_S_GREEN = 0xE007` for big-endian `0x07E0`).
 
@@ -226,7 +229,7 @@ The firmware runs a classic PPI (Plan Position Indicator) sweep animation. Under
 
 **Two buffers, strict ownership:**
 
-- `src` — the last successfully fetched frame (bytearray, 115,200 bytes). Treat as read-only. The fetch thread writes a fresh `src` under a lock; the main thread only swaps it in at a rotation boundary.
+- `src` — the last successfully fetched frame (bytearray, 115,200 bytes). The fetch thread writes a fresh `src` under a lock; the main thread swaps it in at the rotation boundary. The clock overlay is baked directly into `src` (see below), so `src` is not purely read-only, but it is only written by the main thread.
 - `fb` (inside `sweep.Sweep`) — the live framebuffer. The sweep overlays the radar image with the sweep line and trail glow. Never blit `src` directly to the display after the first frame; always go through `fb`.
 
 **Per-frame render sequence** (`_render` in `radar.py`):
@@ -238,9 +241,15 @@ The firmware runs a classic PPI (Plan Position Indicator) sweep animation. Under
 5. `sweep_line(az)` — draw the bright AA sweep line.
 6. `blit_band(y0, y1)` — push only the dirty rectangle to the display via SPI.
 
-Frame swap (new `src` from the fetch thread) happens at the 360°→0° rotation boundary so the sweep never reads a partially-coherent frame.
+**Sweep azimuth and wall-clock alignment:** The sweep is driven by `time.time()` with sub-second interpolation via `ticks_ms()` (see `_ntp_wall_sec` / `_ntp_sec_ms` in `main()`). The azimuth formula is `(seconds_within_minute * 6° + 270°) % 360°`, which maps second 0 to 270° (top / 12 o'clock) and proceeds clockwise. The rotation boundary (360°→0°, where `src` is swapped) falls at second 15 (3 o'clock). Without NTP the sweep falls back to a free-running `ticks_ms()` timer.
+
+**Clock overlay:** `_paint_clock` bakes a 2×-scaled (16 px tall) HH:MM timestamp directly into `src` once per minute — no per-frame cost. The text has no background; radar imagery shows through the gaps. `_clock_str` adds 15 seconds to the wall time so the text updates at second 45 (180°, 9 o'clock), which is 15 seconds before the sweep reveals the 12 o'clock area at second 0. When a new frame arrives from the fetch thread, `_stamp_clock_pixels` re-bakes the current cached text into the new `src` immediately.
+
+Frame swap (new `src` from the fetch thread) happens at the 360°→0° rotation boundary (second 15, 3 o'clock) so the sweep never reads a partially-coherent frame.
 
 **SPI performance:** `SPI_BAUD = 40_000_000` (40 MHz). The GC9A01 supports 40–80 MHz. Do not lower this — it was briefly 20 MHz during bring-up and caused visible choppiness. `blit_band` blits only the dirty y-range (the trail bounding box) each frame, not the full 240×240.
+
+**`paint_trail` trig optimization:** The trail glow calls `_blend_radial` for each of the 40 trail steps. Naively that is 80 `sin`/`cos` calls per frame. Instead, relative-angle tables (`_TRAIL_REL_COS`, `_TRAIL_REL_SIN`) are precomputed at module import and the angle-addition identity `sin(az+rel) = sin(az)cos(rel) + cos(az)sin(rel)` is used inside `paint_trail`, reducing the hot path to 2 trig calls per frame.
 
 ## MicroPython viper notes (hard-won)
 
@@ -266,6 +275,8 @@ These are non-obvious constraints that bit us. Read before writing any `@micropy
 6. ✅ Provisioning: captive-portal AP (`portal.py`) on first boot; WPA2 passphrase derived from chip ID; settings drawn on display. Config stored in `/config.json`; `secrets.py` retired.
 7. ✅ Boot status screen: "Connecting…" → "Connected" with settings URL and SSID; holds ≥20 s or until first frame.
 8. ✅ In-radar settings server: `portal.serve()` runs on :80 in a background thread; station list populated as a dropdown from `/stations`; browser redirects back after reboot.
+9. ✅ NTP clock overlay: HH:MM at 12 o'clock, 2× scaled (16 px), no background. Baked into `src` once per minute at second 45 so correct time is visible when the sweep crosses 12 o'clock at second 0. `tz_offset` (hours) configurable in the settings form.
+10. ✅ Wall-clock sweep alignment: second 0 = 12 o'clock (top); sweep proceeds clockwise; rotation boundary (frame swap) at second 15 (3 o'clock). Sub-second interpolation via `ticks_ms()` boundary tracking for smooth motion.
 
 **Remaining:**
 

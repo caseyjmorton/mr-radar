@@ -29,6 +29,14 @@ _TRAIL_CR = (SWEEP_COLOR >> 11) & 0x1F
 _TRAIL_CG = (SWEEP_COLOR >>  5) & 0x3F
 _TRAIL_CB =  SWEEP_COLOR        & 0x1F
 
+# Precomputed trail tables (computed once at import, not per frame).
+# paint_trail uses the angle-addition identity to compute sin/cos for each
+# trail step from just 2 trig calls (sin/cos of az), replacing 80 calls.
+_TRAIL_STEPS   = int(TRAIL_DEG / TRAIL_STEP)
+_TRAIL_ALPHA   = [int(((i + 1) / _TRAIL_STEPS) ** 2 * 180) for i in range(_TRAIL_STEPS)]
+_TRAIL_REL_COS = [math.cos(math.radians(-TRAIL_DEG + i * TRAIL_STEP)) for i in range(_TRAIL_STEPS)]
+_TRAIL_REL_SIN = [math.sin(math.radians(-TRAIL_DEG + i * TRAIL_STEP)) for i in range(_TRAIL_STEPS)]
+
 
 class Sweep:
     def __init__(self, size=240):
@@ -217,14 +225,22 @@ class Sweep:
             fb[o]    = sv[i * 2]
             fb[o + 1] = sv[i * 2 + 1]
 
+    @micropython.native
     def paint_trail(self, az):
-        # Paint the PPI glow: TRAIL_DEG of green behind az, brightest near az, fading back.
+        # Paint the PPI glow using precomputed relative tables and the angle-addition
+        # identity: sin(az+rel) = sin(az)*cos(rel) + cos(az)*sin(rel).
+        # 2 trig calls per frame instead of 2*_TRAIL_STEPS.
         self._trail_n = 0
-        steps = int(TRAIL_DEG / TRAIL_STEP)
-        for i in range(steps):
-            alpha256 = int(((i + 1) / steps) ** 2 * 180)  # quadratic ramp, ~70% max
-            deg = (az - TRAIL_DEG + i * TRAIL_STEP) % 360
-            self._blend_radial(deg, alpha256)
+        a = math.radians(az)
+        ca = math.cos(a)
+        sa = math.sin(a)
+        for i in range(_TRAIL_STEPS):
+            rc = _TRAIL_REL_COS[i]
+            rs = _TRAIL_REL_SIN[i]
+            self._blend_trail_viper(
+                int((sa * rc + ca * rs) * 2048),
+                int((ca * rc - sa * rs) * 2048),
+                _TRAIL_ALPHA[i])
 
     def paint_wedge(self, src, a0, a1, step=0.25):
         # Repaint source echoes across the wedge [a0, a1). The fine step keeps the

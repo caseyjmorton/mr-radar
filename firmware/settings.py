@@ -8,6 +8,7 @@ _DEFAULTS = {
     'renderer_url': 'https://mr-radar.mortons.io',
     'theme':        'vintage',
     'poll_seconds': 60,
+    'tz_offset':    0,
 }
 
 
@@ -29,3 +30,4 @@ STATION      = _c['station']
 RENDERER_URL = _c['renderer_url']
 THEME        = _c['theme']
 POLL_SECONDS = _c['poll_seconds']
+TZ_OFFSET    = float(_c.get('tz_offset', 0))

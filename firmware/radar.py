@@ -23,11 +23,13 @@ import sweep
 
 FRAME_BYTES = 240 * 240 * 2   # rgb565, exactly 115200 bytes
 ROTATION_MS = 60000           # one 360-degree sweep per minute
-TARGET_MS = 45                # min frame period (~22 fps cap); speed is clock-driven
+TARGET_MS = 100               # min frame period (~10 fps cap); speed is clock-driven
 STATUS_MS  = 20_000           # minimum time to show the connection status screen
 
 _lock = _thread.allocate_lock()
 _latest = None                # most recent good frame (bytearray), or None
+_ntp_synced = False
+_clock_logged = False         # print clock info once on first render
 
 # Framebuf stores RGB565 little-endian; GC9A01 wants big-endian. Pre-swap all colors.
 _S_BG     = 0x0000   # black
@@ -36,6 +38,29 @@ _S_GREEN  = 0xE007   # bright green  (0x07E0 BE)
 _S_CYAN   = 0xFF07   # cyan          (0x07FF BE)
 _S_GRAY   = 0x1084   # mid-gray      (0x8410 BE)
 _S_YELLOW = 0xE0FF   # yellow        (0xFFE0 BE)
+
+# Clock overlay — same color as the sweep bar, no background (radar shows through).
+# _CLOCK_COLOR = 0xE007: framebuf (LE) stores [0x07, 0xE0] per pixel, which is
+# the same byte layout as big-endian 0x07E0 (green) in scope.fb. The clock is
+# painted into scope.fb and delivered via blit_band — no separate blit_buffer.
+_CLOCK_COLOR   = _S_GREEN
+_CLOCK_BG      = 0x0000   # black (byte-order-neutral)
+
+# Render text at 8x8 font ("HH:MM" = 5 chars = 40×8 px), then 2x-scale to display.
+_CLOCK_RND_W   = 40
+_CLOCK_RND_H   = 8
+_CLOCK_TEXT_W  = _CLOCK_RND_W * 2    # 80 px wide at 2x
+_CLOCK_TEXT_H  = _CLOCK_RND_H * 2    # 16 px tall at 2x
+_CLOCK_TEXT_X  = (240 - _CLOCK_TEXT_W) // 2   # 80 (centered)
+_CLOCK_TEXT_Y  = 26    # keeps text at same visual position as before
+
+# Small render buffer for framebuf text(); pixel cache stores only lit (green) pixels.
+# Cache is rebuilt once per minute; _stamp_clock_pixels writes ~640 pixels per frame.
+_CLOCK_RND     = bytearray(_CLOCK_RND_W * _CLOCK_RND_H * 2)
+_CLOCK_TMP     = framebuf.FrameBuffer(_CLOCK_RND, _CLOCK_RND_W, _CLOCK_RND_H, framebuf.RGB565)
+_CLOCK_PX_BUF  = bytearray(_CLOCK_TEXT_W * _CLOCK_TEXT_H * 4)  # (off_lo, off_hi, b0, b1)
+_CLOCK_PX_N    = 0
+_CLOCK_LAST_STR = None   # cached time string; rebuild pixel cache only when this changes
 
 
 def _draw_status(tft, ssid, renderer_url, status_text, status_color):
@@ -65,6 +90,71 @@ def _draw_status(tft, ssid, renderer_url, status_text, status_color):
         ct(status_text, 134, status_color)
 
     tft.blit_buffer(buf, 0, 0, W, H)
+
+
+def _try_ntp():
+    global _ntp_synced
+    try:
+        import ntptime
+        ntptime.settime()
+        _ntp_synced = True
+        print("ntp: synced, utc:", time.localtime())
+    except Exception as e:
+        print("ntp: failed:", e)
+
+
+@micropython.native
+def _stamp_clock_pixels(fb):
+    px = _CLOCK_PX_BUF
+    n = _CLOCK_PX_N
+    for i in range(n):
+        off = px[i * 4] | (px[i * 4 + 1] << 8)
+        fb[off]     = px[i * 4 + 2]
+        fb[off + 1] = px[i * 4 + 3]
+
+
+def _paint_clock(fb, time_str):
+    # Rebuild pixel cache only when the time string changes (once per minute).
+    # Each call stamps cached green pixels into scope.fb; radar shows through the gaps.
+    global _clock_logged, _CLOCK_LAST_STR, _CLOCK_PX_N
+    if not _clock_logged:
+        print("clock: ntp=%s time=%r" % (_ntp_synced, time_str))
+        _clock_logged = True
+    try:
+        if time_str != _CLOCK_LAST_STR:
+            _CLOCK_TMP.fill(_CLOCK_BG)
+            _CLOCK_TMP.text(time_str, 0, 0, _CLOCK_COLOR)
+            n = 0
+            for sr in range(_CLOCK_RND_H):
+                for sc in range(_CLOCK_RND_W):
+                    so = (sr * _CLOCK_RND_W + sc) * 2
+                    b0 = _CLOCK_RND[so]
+                    b1 = _CLOCK_RND[so + 1]
+                    if b0 != 0 or b1 != 0:
+                        for dr in range(2):
+                            y = _CLOCK_TEXT_Y + sr * 2 + dr
+                            x_base = _CLOCK_TEXT_X + sc * 2
+                            for dc in range(2):
+                                off = (y * 240 + x_base + dc) * 2
+                                _CLOCK_PX_BUF[n * 4]     = off & 0xFF
+                                _CLOCK_PX_BUF[n * 4 + 1] = (off >> 8) & 0xFF
+                                _CLOCK_PX_BUF[n * 4 + 2] = b0
+                                _CLOCK_PX_BUF[n * 4 + 3] = b1
+                                n += 1
+            _CLOCK_PX_N = n
+            _CLOCK_LAST_STR = time_str
+        _stamp_clock_pixels(fb)
+    except Exception as e:
+        print("clock paint:", e)
+
+
+def _clock_str(tz_secs):
+    if not _ntp_synced:
+        return "--:--"
+    # Add 15 s so the text updates at second 45 (270° = 12 o'clock), the exact moment
+    # the sweep reveals the top of the display — 15 s before the rotation boundary.
+    lt = time.localtime(time.time() + tz_secs + 15)
+    return "%02d:%02d" % (lt[3], lt[4])
 
 
 def connect_wifi(timeout=20):
@@ -171,7 +261,7 @@ def fetch_loop(host, port, base, tls):
 
 def _render(scope, tft, src, a0, a1):
     scope.restore_trail()
-    scope.restore_line(src)              # undo the previous AA line exactly
+    scope.restore_line(src)
     scope.paint_wedge(src, a0, a1)
     scope.paint_trail(a1)
     scope.sweep_line(a1)
@@ -183,8 +273,11 @@ def main():
     tft = config.make_display()
     boot_ms = time.ticks_ms()
 
+    tz_secs = int(getattr(secrets, 'TZ_OFFSET', 0) * 3600)
+
     _draw_status(tft, secrets.WIFI_SSID, None, 'Connecting...', _S_YELLOW)
     wlan = connect_wifi()
+    _try_ntp()
     device_ip = wlan.ifconfig()[0]
     _draw_status(tft, secrets.WIFI_SSID, 'http://' + device_ip, 'Connected!', _S_GREEN)
 
@@ -213,12 +306,21 @@ def main():
             break
         time.sleep_ms(100)
 
+    _paint_clock(src, _clock_str(tz_secs))   # bake clock into the source frame
     scope.show_frame(tft, src)
     print("status screen done; starting sweep")
 
     pending = None
     start = time.ticks_ms()
-    prev = 0.0
+    last_time_str = _clock_str(tz_secs)
+    if _ntp_synced:
+        prev = (float((time.time() + tz_secs) % 60) * 6.0 + 270.0) % 360.0
+        _ntp_wall_sec = time.time() + tz_secs   # wall second at last ticks capture
+        _ntp_sec_ms   = time.ticks_ms()         # ticks_ms when that second began
+    else:
+        prev = 0.0
+        _ntp_wall_sec = 0
+        _ntp_sec_ms   = 0
 
     while True:
         t0 = time.ticks_ms()
@@ -231,9 +333,24 @@ def main():
         if latest is not None and latest is not src:
             pending = latest             # swap in new frames at a rotation boundary
 
-        # Azimuth is driven by the wall clock, so a rotation is always 60 s
-        # regardless of render speed - slow frames just paint bigger wedges.
-        cur = (time.ticks_diff(t0, start) % ROTATION_MS) * 360.0 / ROTATION_MS
+        # Azimuth = wall-clock seconds-within-minute, smoothly interpolated.
+        # ticks_ms() % 1000 is uncorrelated with time.time() sub-second, so we
+        # track the ticks value at each second boundary and interpolate from there.
+        # This gives smooth motion with no backward jumps.
+        if _ntp_synced:
+            wall_t = time.time() + tz_secs
+            if wall_t != _ntp_wall_sec:
+                _ntp_wall_sec = wall_t
+                _ntp_sec_ms   = time.ticks_ms()
+            frac = min(time.ticks_diff(time.ticks_ms(), _ntp_sec_ms) / 1000.0, 0.999)
+            cur = (float(wall_t % 60 + frac) * 6.0 + 270.0) % 360.0
+        else:
+            cur = (time.ticks_diff(t0, start) % ROTATION_MS) * 360.0 / ROTATION_MS
+
+        time_str = _clock_str(tz_secs)
+        if time_str != last_time_str:
+            _paint_clock(src, time_str)   # bake new time into current source frame
+            last_time_str = time_str
 
         if cur < prev:                   # wrapped past 360 deg: finish + swap
             _render(scope, tft, src, prev, 360.0)
@@ -241,6 +358,7 @@ def main():
             if pending is not None:
                 src = pending
                 pending = None
+                _stamp_clock_pixels(src)  # bake current clock into newly arrived frame
         if cur > prev:
             _render(scope, tft, src, prev, cur)
             prev = cur
