@@ -97,6 +97,11 @@ The primary endpoint. Returns a ready-to-display image.
 
 - `X-Radar-Timestamp` — Unix timestamp (seconds) of the RainViewer frame used. The firmware should track this to avoid re-blitting an unchanged frame.
 - `X-Partial-Data: 1` — Set if any upstream tile fetch failed. The image is still returned with whatever data was available; firmware should show a stale/degraded indicator.
+- `X-Renderer-Version` — semver of the renderer that served the frame (matches `renderer/package.json`). Useful for fleet-side debugging.
+
+**Request headers (expected from firmware):**
+
+- `User-Agent: mr-radar-fw/<X.Y.Z>` — semver of the firmware that issued the request (matches `firmware/version.py`). Renderer access logs key on this to see firmware version distribution across the fleet.
 
 **Example:**
 
@@ -116,7 +121,7 @@ Returns a JSON array of all known NEXRAD stations:
 
 ### `GET /health`
 
-Returns `{"ok": true, "ts": <unix-ms>}`. Use for load-balancer checks and deploy validation.
+Returns `{"ok": true, "ts": <unix-ms>, "version": "<X.Y.Z>"}`. Use for load-balancer checks and deploy validation; `version` echoes `renderer/package.json` so you can confirm what's actually running.
 
 ## Upstream data sources (constraints, current as of early 2026)
 
