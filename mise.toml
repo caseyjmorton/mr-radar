@@ -1,5 +1,6 @@
 [tools]
 flyctl = "latest"
 github-cli = "latest"
+node = "26"
 python = "latest"
 uv = "latest"
