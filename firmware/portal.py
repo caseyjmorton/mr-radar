@@ -5,6 +5,7 @@ import time
 import machine
 import framebuf
 import config as _config
+from version import __version__
 
 _AP_SSID = 'mr-radar-setup'
 _AP_PASS = ''.join('%02x' % b for b in machine.unique_id())
@@ -67,7 +68,9 @@ _STATION_INPUT_
 <label><input type="checkbox" name="dst" value="1"_DST_SEL_> Auto-adjust (US rules)</label>
 </div>
 <button type="submit">Save &amp; Reboot</button>
-</form></body></html>"""
+</form>
+<p class="sub" style="text-align:center;margin-top:16px">mr-radar firmware v_FW_VERSION_</p>
+</body></html>"""
 
 _SAVED_HTML = """\
 <!DOCTYPE html><html>
@@ -128,7 +131,8 @@ def _fetch_stations(renderer_url):
             if tls:
                 import ssl
                 s = ssl.wrap_socket(s, server_hostname=host)
-            s.write(('GET /stations HTTP/1.0\r\nHost: %s\r\n\r\n' % host).encode())
+            s.write(('GET /stations HTTP/1.0\r\nHost: %s\r\nUser-Agent: mr-radar-fw/%s\r\n\r\n'
+                     % (host, __version__)).encode())
             data = b''
             while True:
                 try:
@@ -201,6 +205,7 @@ def _render_form(cfg, stations=None):
     h = h.replace('_POLL_SECONDS_', str(cfg['poll_seconds']))
     h = h.replace('_TZ_OFFSET_', str(cfg.get('tz_offset', 0)))
     h = h.replace('_DST_SEL_', ' checked' if cfg.get('dst') else '')
+    h = h.replace('_FW_VERSION_', __version__)
     return h
 
 
@@ -313,6 +318,7 @@ def _draw_portal_screen():
     ct(_AP_PASS, 131, _WHITE)
     ct('Then open:', 151, _GRAY)
     ct('192.168.4.1', 165, _CYAN)
+    ct('fw v' + __version__, 200, _GRAY)
 
     try:
         tft = _config.make_display()

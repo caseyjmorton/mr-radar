@@ -20,6 +20,7 @@ import config
 import portal
 import settings as secrets
 import sweep
+from version import __version__
 
 FRAME_BYTES = 240 * 240 * 2   # rgb565, exactly 115200 bytes
 ROTATION_MS = 60000           # one 360-degree sweep per minute
@@ -97,6 +98,8 @@ def _draw_status(tft, ssid, renderer_url, status_text, status_color):
         ct(ssid[:22], 100, _S_WHITE)
         ct('Status:', 120, _S_GRAY)
         ct(status_text, 134, status_color)
+
+    ct('fw v' + __version__, 200, _S_GRAY)
 
     tft.blit_buffer(buf, 0, 0, W, H)
 
@@ -272,8 +275,8 @@ def fetch_over(s, host, base, throttle_ms=0):
     theme = getattr(secrets, "THEME", "vintage")
     path = "{}/frame?station={}&fmt=rgb565&theme={}".format(
         base, secrets.STATION, theme)
-    s.write("GET {} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n\r\n"
-            .format(path, host).encode())
+    s.write("GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: mr-radar-fw/{}\r\nConnection: keep-alive\r\n\r\n"
+            .format(path, host, __version__).encode())
     head = b""
     while b"\r\n\r\n" not in head:
         chunk = s.read(256)

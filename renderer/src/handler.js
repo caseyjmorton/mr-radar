@@ -1,5 +1,6 @@
 const { renderFrame, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, DEFAULT_OPACITY } = require('./composite');
 const { resolveStation, listStations } = require('./stations');
+const { version } = require('../package.json');
 
 async function frameHandler(req, res) {
   const q = req.query;
@@ -49,6 +50,7 @@ async function frameHandler(req, res) {
         'Content-Length': result.buffer.length,
         'X-Radar-Timestamp': String(result.timestamp),
         'X-Partial-Data': result.partial ? '1' : '0',
+        'X-Renderer-Version': version,
         'Cache-Control': 'no-store',
       })
       .end(result.buffer);
