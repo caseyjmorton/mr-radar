@@ -1,0 +1,40 @@
+name: deploy-renderer
+
+# Deploys the renderer to fly.io. This runs ONLY on push to main (i.e. after a
+# PR has merged), never on pull_request — so the FLY_API_TOKEN is never exposed
+# to fork/PR code. The token lives in the `production` GitHub Environment, which
+# is configured with a required reviewer (the maintainer) and restricted to
+# protected branches, so every deploy pauses for explicit approval and the
+# secret is unreadable from any job that doesn't target this environment.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'renderer/**'
+      - '.github/workflows/deploy-renderer.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# Never cancel an in-flight deploy; queue instead.
+concurrency:
+  group: deploy-renderer
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: renderer
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: superfly/flyctl-actions/setup-flyctl@dfdfedc86b296f5e5384f755a18bf400409a15d0 # v1.4
+      - name: Deploy to fly.io
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

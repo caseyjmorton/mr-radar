@@ -1,4 +1,5 @@
 [tools]
 flyctl = "latest"
+github-cli = "latest"
 python = "latest"
 uv = "latest"

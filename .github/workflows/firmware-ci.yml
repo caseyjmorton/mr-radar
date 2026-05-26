@@ -1,0 +1,28 @@
+name: firmware-ci
+
+# The firmware is MicroPython and can't run its hardware imports (machine,
+# framebuf, micropython) under CPython, but byte-compiling catches syntax
+# errors — including in the @micropython.viper / @native hot loops — before
+# they ever reach a reflash. This is a cheap, no-dependency safety net.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - name: Byte-compile firmware sources
+        run: python3 -m compileall -q firmware

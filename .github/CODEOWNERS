@@ -1,0 +1,10 @@
+# Code owners for mr-radar.
+#
+# Every PR requires review from an owner listed here. This file only takes
+# effect once branch protection has "Require review from Code Owners" enabled
+# for the default branch — see scripts/setup-branch-protection.sh.
+#
+# The last matching pattern wins, so keep the catch-all first and add more
+# specific owners below it as the project grows.
+
+* @caseyjmorton
