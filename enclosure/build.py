@@ -118,18 +118,19 @@ PARAMS = {
     "back_screw_boss_inset":        6.0,    # X-corner inset for back-bottom bosses
     "top_screw_boss_inset":         6.0,    # X-corner inset for top-front bosses
 
-    # Dev board snap-fit channel on the back panel (Waveshare ESP32-S3-Zero).
-    # Board dims include a small inflate so the slot accommodates real boards.
-    "board_w":             24.0,
-    "board_h":             18.5,
-    "board_thickness":     1.6,
-    "board_floor_height":  1.4,
-    "board_tab_height":    2.0,
-    "board_tab_width":     3.0,
-    "board_z_center_from_top": 92.0,
-    "board_usb_cutout_w":  10.5,       # USB-C body ~9 mm + margin, then -0.5 print = 10
-    "board_usb_cutout_h":  5.5,        # USB-C body ~3.3 mm + margin
-    "board_usb_protrude":  1.5,
+    # Dev board (Waveshare ESP32-S3-Zero). Mounted to the cabinet FLOOR, long
+    # axis along X, short axis along Y, USB-C on the -Y (back) edge so the
+    # connector pokes through the back panel's cutout.
+    "board_long":             24.0,    # X dimension (long edge), with small inflate
+    "board_short":            18.5,    # Y dimension (short edge, USB-C on -Y end)
+    "board_thickness":        1.6,     # Z dimension
+    "board_floor_height":     2.0,     # standoff height: gap between cabinet floor and board
+    "board_tab_height":       1.5,     # cap height above the board's top surface
+    "board_tab_width":        3.0,     # tab post X thickness
+    "board_back_clearance":   0.6,     # gap between board back edge and back lip front face
+    "board_usb_cutout_w":     10.5,    # X dim of USB-C cutout (target print 10mm)
+    "board_usb_cutout_h":     5.5,     # Z dim of USB-C cutout (target print 5mm)
+    "board_usb_z_above_top":  1.5,     # USB-C center is this far above the board's top surface
 
     # Output
     "version":    __version__,
@@ -250,8 +251,17 @@ def _back_screw_bosses(p: dict) -> cq.Workplane:
 
 
 def _top_screw_bosses(p: dict) -> cq.Workplane:
-    """Two posts at the top-FRONT corners. They start just BELOW the top
-    panel (at z = H - panel_thickness) so the panel and boss don't share Z."""
+    """Two posts at the top-FRONT corners with a 45 degree tapered fin running
+    from each boss down to the inside of the front wall. The fin removes the
+    need for support material when the body is printed upright: each layer of
+    the fin extends just 0.3 mm (= layer height) farther from the wall, which
+    is the 45 degree printable limit.
+
+    Boss layout:
+      - Boss center sits a comfortable distance back from the front wall.
+      - Fin sits BELOW the boss (z < boss_bottom) on the front-wall side, so
+        as the print rises, the fin gradually thickens until it merges with
+        the boss bottom. The boss itself is then supported continuously."""
     W, D, H, wall = p["width"], p["depth"], p["height"], p["wall"]
     inset = p["top_screw_boss_inset"]
     t = p["panel_thickness"]
@@ -259,14 +269,43 @@ def _top_screw_bosses(p: dict) -> cq.Workplane:
     pilot_r = _hole_dia(p, p["screw_boss_pilot_target"]) / 2
     boss_h = p["top_lip_depth"] + 6.0
     z_top_of_boss = H - t
+    z_boss_bottom = z_top_of_boss - boss_h
     xs = [-W / 2 + inset, W / 2 - inset]
-    y = D / 2 - wall - inset + 1.0
+    # Boss y center: inset a bit from the front wall so the fin has room.
+    y_front_inner = D / 2 - wall
+    y_boss = y_front_inner - inset + 1.0
+    # Distance from boss's FRONT edge to the front wall:
+    fin_y_run = y_front_inner - (y_boss + boss_r)
+    # Vertical taper depth: 45 degrees -> dz = dy. The fin starts at the boss
+    # bottom and runs DOWN by fin_y_run, where it merges with the front wall.
+    fin_z_run = fin_y_run
+    fin_x_width = p["screw_boss_dia"]
+
     parts: list[cq.Workplane] = []
     for x in xs:
-        boss = _cyl_z(x, y, z_start=z_top_of_boss - boss_h, radius=boss_r, length=boss_h)
-        pilot = _cyl_z(x, y, z_start=z_top_of_boss - boss_h - 0.5, radius=pilot_r,
+        boss = _cyl_z(x, y_boss, z_start=z_boss_bottom, radius=boss_r, length=boss_h)
+        pilot = _cyl_z(x, y_boss, z_start=z_boss_bottom - 0.5, radius=pilot_r,
                        length=t + boss_h + 1.0)
-        parts.append(boss.cut(pilot))
+        boss = boss.cut(pilot)
+
+        # 45 degree fin: triangular prism in YZ, extruded in X across the boss's
+        # X footprint. Top edge sits flush with the boss bottom; hypotenuse
+        # drops down-and-forward to the front wall interior.
+        # Triangle vertices (in YZ, looking down +X):
+        #   A: (y_boss + boss_r, z_boss_bottom)       # boss front edge, at boss bottom
+        #   B: (y_front_inner,   z_boss_bottom)       # front wall, same Z
+        #   C: (y_front_inner,   z_boss_bottom - fin_z_run)  # front wall, lower
+        # The fin shape is the right triangle ABC, where AC is the 45 deg slope.
+        fin_profile = (
+            cq.Workplane("YZ")
+            .moveTo(y_boss + boss_r, z_boss_bottom)
+            .lineTo(y_front_inner, z_boss_bottom)
+            .lineTo(y_front_inner, z_boss_bottom - fin_z_run)
+            .close()
+        )
+        # Extrude in +X by fin_x_width, centered on x:
+        fin = fin_profile.extrude(fin_x_width).translate((x - fin_x_width / 2, 0, 0))
+        parts.append(boss.union(fin))
     return _combine(parts)
 
 
@@ -333,22 +372,117 @@ def _top_lip(p: dict) -> cq.Workplane:
 
 
 def _display_mount_posts(p: dict) -> cq.Workplane:
-    """Two posts behind the front wall to screw the GC9A01 PCB to."""
+    """Two horizontal posts behind the front wall, axis along Y, tapped for
+    M2 self-tap screws through the GC9A01 PCB's mount holes.
+
+    Each post is given a 45 degree triangular fin BELOW it on the front-wall
+    side so the underside is self-supporting during upright printing. As the
+    print rises, the fin's outer (away from wall) edge moves 0.3 mm out per
+    layer, reaching the full post X width just as the post's bottom appears
+    overhead."""
     D, H, wall = p["depth"], p["height"], p["wall"]
     spacing = p["display_post_spacing"]
     post_r = p["display_post_dia"] / 2
     pilot_r = _hole_dia(p, p["display_post_pilot_target"]) / 2
     post_h = 4.0
     z = H - p["display_center_z_from_top"] - p["display_post_z_offset_below_center"]
-    # Posts attach to the inside of the front wall and protrude into the cavity.
-    # Base of the post is at y = D/2 - wall (interior surface of front wall);
-    # tip is at y = D/2 - wall - post_h (deeper into the cavity, in -Y).
-    y_tip = D / 2 - wall - post_h
+    y_front_inner = D / 2 - wall
+    y_tip = y_front_inner - post_h          # post extends from y_tip to y_front_inner
+    # Fin: under the post, attached to the front wall. The post's bottom is at
+    # z = z - post_r (its lowest point). The fin runs DOWN from the post's
+    # underside at the wall side and tapers at 45 deg back to the front wall.
+    fin_z_run = post_h                       # match the post's Y extent for symmetry
+    fin_z_top = z                             # top of the fin = post center Z
+    fin_z_bot = z - fin_z_run
+
     parts: list[cq.Workplane] = []
     for x in (-spacing / 2, spacing / 2):
         post = _cyl_y(x, z, y_start=y_tip, radius=post_r, length=post_h)
         pilot = _cyl_y(x, z, y_start=y_tip - 0.1, radius=pilot_r, length=post_h + 0.2)
-        parts.append(post.cut(pilot))
+        post = post.cut(pilot)
+
+        # Triangular fin (in YZ) extruded across the post's X width.
+        # Vertices: top at the post-tip Y at fin_z_top; goes back to the wall
+        # at fin_z_top; drops down on the wall to fin_z_bot. 45 deg hypotenuse
+        # from (y_tip, fin_z_top) to (y_front_inner, fin_z_bot).
+        fin_profile = (
+            cq.Workplane("YZ")
+            .moveTo(y_tip, fin_z_top)
+            .lineTo(y_front_inner, fin_z_top)
+            .lineTo(y_front_inner, fin_z_bot)
+            .close()
+        )
+        fin = fin_profile.extrude(2 * post_r).translate((x - post_r, 0, 0))
+        parts.append(post.union(fin))
+    return _combine(parts)
+
+
+def _board_mount(p: dict) -> cq.Workplane:
+    """ESP32-S3-Zero retention on the cabinet FLOOR. Four small standoffs
+    raise the board off the floor (airflow + WiFi-antenna clearance) and
+    two side retention tabs cap the long edges. The board's long axis is X;
+    its short axis is Y with the USB-C connector on the -Y (back) edge.
+
+    Board is installed BEFORE the back panel goes on: slide it in from the
+    open back, push down onto the standoffs between the tabs."""
+    W, D, wall = p["width"], p["depth"], p["wall"]
+    bl, bs, bt = p["board_long"], p["board_short"], p["board_thickness"]
+    floor_h = p["board_floor_height"]
+    slip = p["slip_tol"]
+    panel_t = p["panel_thickness"]
+    back_lip_d = p["back_lip_depth"]
+    back_clear = p["board_back_clearance"]
+
+    # Y placement: board's back edge sits just past the back lip's front face
+    # so the board doesn't collide with the lip and the USB-C connector pokes
+    # forward of the back panel hole into the cable plug's path.
+    board_y_back = -D / 2 + panel_t + back_lip_d + back_clear
+    board_y_front = board_y_back + bs
+    board_y_center = (board_y_back + board_y_front) / 2
+    board_z_bottom = wall + floor_h
+    board_z_top = board_z_bottom + bt
+
+    parts: list[cq.Workplane] = []
+
+    # Four corner standoffs: short bumps raising the board off the floor.
+    standoff = 2.5
+    for sx in (-1, 1):
+        for sy_y in (board_y_back + standoff / 2, board_y_front - standoff / 2):
+            sx_x = sx * (bl / 2 - standoff / 2)
+            parts.append(_box_at(
+                x=sx_x, y=sy_y, z=wall + floor_h / 2,
+                lx=standoff, ly=standoff, lz=floor_h,
+            ))
+
+    # Two retention tabs at the board's long edges, centered on Y.
+    tab_w = p["board_tab_width"]
+    tab_h = p["board_tab_height"]
+    tab_y_len = min(bs - 6.0, 10.0)
+    cap_overlap = 1.0
+    post_x_inner = bl / 2 + slip
+    post_x_outer = post_x_inner + tab_w
+
+    for x_sign in (-1, 1):
+        post_x_center = x_sign * (post_x_inner + post_x_outer) / 2
+        post = _box_at(
+            x=post_x_center, y=board_y_center,
+            z=(wall + board_z_top) / 2,
+            lx=tab_w, ly=tab_y_len, lz=board_z_top - wall,
+        )
+        # Cap that overhangs the board's top by cap_overlap. Flat rectangular
+        # cap with a small (<= 1 mm) horizontal overhang — well within what a
+        # 0.6 mm nozzle bridges without explicit support material.
+        cap_inner_x = x_sign * (post_x_inner - cap_overlap)
+        cap_outer_x = x_sign * post_x_outer
+        cap_x_center = (cap_inner_x + cap_outer_x) / 2
+        cap_lx = abs(cap_outer_x - cap_inner_x)
+        cap = _box_at(
+            x=cap_x_center, y=board_y_center,
+            z=board_z_top + tab_h / 2,
+            lx=cap_lx, ly=tab_y_len, lz=tab_h,
+        )
+        parts.append(post.union(cap))
+
     return _combine(parts)
 
 
@@ -416,6 +550,7 @@ def build_body(p: dict) -> cq.Workplane:
     body = body.union(_back_screw_bosses(p))
     body = body.union(_top_screw_bosses(p))
     body = body.union(_display_mount_posts(p))
+    body = body.union(_board_mount(p))
     body = body.union(_front_decor(p))
     return body
 
@@ -450,68 +585,24 @@ def build_back_panel(p: dict) -> cq.Workplane:
         hole = _cyl_y(x, z_screw, y_start=-D / 2 - 0.5, radius=screw_r, length=t + 1.0)
         panel = panel.cut(hole)
 
-    # USB-C cutout. Slot punched through the panel at the dev board's Y plane.
-    board_z = H - p["board_z_center_from_top"]
+    # USB-C cutout aligned with the board on the cabinet floor. Board sits
+    # at z = wall + board_floor_height with its top at +board_thickness; the
+    # USB-C connector's center is `board_usb_z_above_top` above the board top.
+    usb_center_z = (
+        wall
+        + p["board_floor_height"]
+        + p["board_thickness"]
+        + p["board_usb_z_above_top"]
+    )
     usb_w = p["board_usb_cutout_w"] + p["hole_oversize"]
     usb_h = p["board_usb_cutout_h"] + p["hole_oversize"]
     usb = _box_at(
-        x=0, y=-D / 2 + t / 2, z=board_z,
+        x=0, y=-D / 2 + t / 2, z=usb_center_z,
         lx=usb_w, ly=t + 1.0, lz=usb_h,
     )
     panel = panel.cut(usb)
 
-    # Snap-fit shelf for the ESP32-S3-Zero. Board sits flat against the inside
-    # of the panel; a low rim around its footprint locates it laterally, and two
-    # overhanging tabs hold it down. USB-C points OUT through the panel cutout.
-    bw, bh, bt = p["board_w"], p["board_h"], p["board_thickness"]
-    floor_h = p["board_floor_height"]
-    tab_h = p["board_tab_height"]
-    tab_w = p["board_tab_width"]
-    snap_clearance = p["slip_tol"]
-
-    # Floor: solid pad on the inside (+Y face) of the panel, then we punch a
-    # central hole so the board sits on a rim and the antenna has airflow.
-    floor_y_start = -D / 2 + t                          # inside face of panel
-    floor_outer_w = bw + 2 * snap_clearance
-    floor_outer_h = bh + 2 * snap_clearance
-    floor = _box_at(
-        x=0, y=floor_y_start + floor_h / 2, z=board_z,
-        lx=floor_outer_w, ly=floor_h, lz=floor_outer_h,
-    )
-    floor_hollow = _box_at(
-        x=0, y=floor_y_start + floor_h / 2, z=board_z,
-        lx=max(floor_outer_w - 4.0, 0.1),
-        ly=floor_h + 0.2,
-        lz=max(floor_outer_h - 4.0, 0.1),
-    )
-    floor = floor.cut(floor_hollow)
-
-    # Retention tabs flank the board's long edges. Each tab is a thin upright
-    # whose top half cantilevers inward over the board to clamp it in place.
-    tab_post_y_thickness = bt + 0.4                       # vertical section flush w/ board side
-    tab_x = bw / 2 + snap_clearance + tab_w / 2           # center of tab in X
-    tab_y_center = floor_y_start + floor_h + tab_post_y_thickness / 2
-
-    tabs: list[cq.Workplane] = []
-    for x_sign in (-1, 1):
-        # Vertical post next to the board edge
-        post = _box_at(
-            x=x_sign * tab_x, y=tab_y_center, z=board_z,
-            lx=tab_w, ly=tab_post_y_thickness, lz=bh - 2.0,
-        )
-        # Overhanging cap that sticks INWARD over the top of the board
-        cap_x_overlap = 1.0
-        cap_lx = tab_w + cap_x_overlap
-        cap_x_center = x_sign * (tab_x - cap_x_overlap / 2)
-        cap = _box_at(
-            x=cap_x_center,
-            y=floor_y_start + floor_h + tab_post_y_thickness + tab_h / 2,
-            z=board_z,
-            lx=cap_lx, ly=tab_h, lz=bh - 2.0,
-        )
-        tabs.append(post.union(cap))
-
-    return _combine([panel, floor] + tabs)
+    return panel
 
 
 def build_top_panel(p: dict) -> cq.Workplane:
