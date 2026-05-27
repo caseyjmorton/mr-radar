@@ -95,7 +95,7 @@ PARAMS = {
     "led_height":  0.9,                # 3 layers
     "led_count":   10,
     "led_pitch":   3.8,
-    "led_column_x_offset_from_center": 28.0,
+    "led_column_x_offset_from_center": -28.0,    # negative = viewer's right when facing front
     "led_column_center_z_from_top": 38.0,
 
     # MR. RADAR label. font_size big enough that letter strokes are >= 2 nozzle
@@ -380,24 +380,28 @@ def _front_decor(p: dict) -> cq.Workplane:
         z = led_center_z + (i - (led_n - 1) / 2) * led_p
         parts.append(_cyl_y(led_x, z, y_start=D / 2, radius=led_r, length=led_h))
 
-    # MR. RADAR label: extrude on the XZ plane (normal -Y, so extrude(positive)
-    # goes -Y); we want it raised in +Y from the front face, so we extrude in
-    # the natural direction and then translate to land on the outside of the
-    # front face.
+    # MR. RADAR label. Built on an explicit +Y-normal plane so the letters are
+    # right-readable from the front (the stock XZ plane has -Y normal, which
+    # made the text render mirrored when viewed from outside). xDir = -X keeps
+    # the plane's local Y pointing up in world coordinates so letters print
+    # the right way up; reading direction (local +X) maps to world -X, which
+    # is the camera's right when looking at the cabinet from the front.
     label_z = H - p["label_z_from_top"]
     label_extrude = p["label_extrude"]
+    front_plane = cq.Plane(
+        origin=cq.Vector(0, D / 2, label_z),
+        xDir=cq.Vector(-1, 0, 0),
+        normal=cq.Vector(0, 1, 0),
+    )
     label = (
-        cq.Workplane("XZ")
-        .center(0, label_z)
+        cq.Workplane(front_plane)
         .text(
             p["label_text"],
             p["label_font_size"],
-            label_extrude,                 # solid extends in -Y by label_extrude
+            label_extrude,
             halign="center",
             valign="center",
         )
-        # Move so the bottom of the text sits on the front face (y = D/2).
-        .translate((0, D / 2 + label_extrude, 0))
     )
     parts.append(label)
 
