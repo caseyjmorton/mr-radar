@@ -1,1 +1,4 @@
 cadquery>=2.4,<3
+CQ-editor==0.7.0
+ocp==0.1.9
+casadi==3.7.2
