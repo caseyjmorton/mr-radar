@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11,<3.13"
+# requires-python = ">=3.13"
 # dependencies = ["cadquery>=2.4,<3"]
 # ///
 """mr-radar enclosure -- parametric 3D-printable shell.
@@ -32,13 +32,13 @@ Coordinate convention:
   y = depth  (front of cabinet is +y, back is -y; front face at y = +depth/2)
   z = height (cabinet bottom at z = 0, top at z = height)
 
-All dimensions are millimetres. Tune PARAMS at the top; geometry is split
-into small functions so you can replace any piece without rewriting the rest.
+All dimensions are millimetres. Tune params/ to adjust; geometry is split
+into per-subassembly modules so you can iterate on any piece independently.
 
 Usage:
-  uv run enclosure/build.py
+  uv run enclosure/main.py
   # or:
-  pip install -r enclosure/requirements.txt && python enclosure/build.py
+  pip install "cadquery>=2.4,<3" && python enclosure/main.py
 """
 
 from __future__ import annotations
