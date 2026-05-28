@@ -7,8 +7,11 @@ name: firmware-ci
 on:
   pull_request:
     branches: [main]
+    paths: ['firmware/**']
   push:
-    branches: [main]
+    paths: ['firmware/**']
+    
+  workflow_dispatch:
 
 permissions:
   contents: read

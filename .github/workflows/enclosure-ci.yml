@@ -5,8 +5,8 @@ on:
     branches: [main]
     paths: ['enclosure/**']
   push:
-    branches: [main]
     paths: ['enclosure/**']
+    
   workflow_dispatch:
 
 permissions:
