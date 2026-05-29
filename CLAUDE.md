@@ -28,10 +28,13 @@ If a proposed change pushes tile decoding or compositing onto the device, or mak
 
 ```
 mr-radar/
-├── firmware/    # MicroPython for the ESP32-S3. This is what people flash.
+├── firmware/
+│   ├── src/     # MicroPython source files — what gets flashed to the device.
+│   ├── util/    # Developer utilities (test_pattern.py, etc.); not flashed.
+│   ├── doc/     # Hardware docs (WIRING.md, pinout notes).
+│   └── test/    # Unit tests (future).
 ├── renderer/    # Stateless image service (Node.js + sharp). Optionally self-hosted.
-├── enclosure/   # OpenSCAD -> STL. NOT YET STARTED. Do not create files here
-│                #   unless explicitly asked; it is handled in a separate effort.
+├── enclosure/   # CadQuery parametric enclosure; STLs built by CI.
 ├── CLAUDE.md
 └── README.md
 ```
@@ -54,7 +57,7 @@ Keep firmware and renderer concerns strictly separated. They communicate only ov
   | CS | Chip select | 7 |
   | RST | Reset (onboard 10k pullup) | 8 |
 
-  **No backlight pin:** this module's backlight is hardwired on (LEDA → 2Ω → 3.3 V), so PWM dimming is not possible without a hardware mod. On the ESP32-S3, GPIO8 is a plain GPIO (not a strapping pin, unlike the C3), so RST here is unconstrained and the display's onboard 10k pullup is harmless. Logic is 3.3 V, matching the S3 — no level shifting needed. Verified working with `SPI(1)` (its default `miso=13` is a free pin; avoid `SPI(2)`, whose default `miso=37` collides with PSRAM). See `firmware/WIRING.md` for the full pinout, schematic notes, and dimensions. Treat the pin map as configuration, not hard-coded magic numbers.
+  **No backlight pin:** this module's backlight is hardwired on (LEDA → 2Ω → 3.3 V), so PWM dimming is not possible without a hardware mod. On the ESP32-S3, GPIO8 is a plain GPIO (not a strapping pin, unlike the C3), so RST here is unconstrained and the display's onboard 10k pullup is harmless. Logic is 3.3 V, matching the S3 — no level shifting needed. Verified working with `SPI(1)` (its default `miso=13` is a free pin; avoid `SPI(2)`, whose default `miso=37` collides with PSRAM). See `firmware/doc/WIRING.md` for the full pinout, schematic notes, and dimensions. Treat the pin map as configuration, not hard-coded magic numbers.
 
 ### ESP32-S3 flashing facts that bite people
 - Flash offset is **`0x0`**, NOT `0x1000` (that's the classic ESP32). Getting this wrong produces a board that won't boot.
@@ -101,7 +104,7 @@ The primary endpoint. Returns a ready-to-display image.
 
 **Request headers (expected from firmware):**
 
-- `User-Agent: mr-radar-fw/<X.Y.Z>` — semver of the firmware that issued the request (matches `firmware/version.py`). Renderer access logs key on this to see firmware version distribution across the fleet.
+- `User-Agent: mr-radar-fw/<X.Y.Z>` — semver of the firmware that issued the request (matches `firmware/src/version.py`). Renderer access logs key on this to see firmware version distribution across the fleet.
 
 **Example:**
 

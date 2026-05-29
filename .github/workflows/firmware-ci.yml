@@ -28,4 +28,4 @@ jobs:
         with:
           persist-credentials: false
       - name: Byte-compile firmware sources
-        run: python3 -m compileall -q firmware
+        run: python3 -m compileall -q firmware/src
