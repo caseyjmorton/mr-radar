@@ -4,7 +4,7 @@ A tiny weather radar display. An ESP32-S3 drives a round 240×240 TFT and contin
 
 The name is a nod to the radar scene in Mel Brooks' *Spaceballs*. We hope you find *something* on it.
 
-> **Status:** early development. Renderer complete; firmware in progress.
+> **Status:** v0.1.0 — renderer, firmware, and enclosure all at initial release.
 
 ## What it is
 
@@ -29,10 +29,13 @@ You can use the **public default renderer** (no setup) or **self-host your own**
 
 ```text
 mr-radar/
-├── firmware/    # MicroPython for the ESP32-S3 — this is what you flash
-├── renderer/    # Stateless image service (Node.js + sharp) — optional to self-host
-├── enclosure/   # 3D-printable case (OpenSCAD → STL) — coming later
-├── CLAUDE.md    # guidance for AI-assisted development
+├── firmware/
+│   ├── src/   # MicroPython source — this is what you flash
+│   ├── util/  # Developer utilities (not flashed)
+│   └── doc/   # Wiring and hardware notes
+├── renderer/  # Stateless image service (Node.js + sharp) — optional to self-host
+├── enclosure/ # CadQuery parametric 3D-printable case — STLs in GitHub Releases
+├── CLAUDE.md  # guidance for AI-assisted development
 └── README.md
 ```
 
@@ -53,7 +56,7 @@ Default wiring (configurable in firmware; pins use the module's silkscreen label
 | CS | 7 |
 | RST | 8 |
 
-`SCL`/`SDA` are I2C-style labels but the interface is 4-wire SPI (`SCL` = clock, `SDA` = MOSI). The GC9A01 is write-only, so no MISO is needed, and the backlight is hardwired on (no control pin). Logic is 3.3 V, matching the ESP32-S3 — no level shifting. See [`firmware/WIRING.md`](firmware/WIRING.md) for the full pinout, schematic notes, and dimensions.
+`SCL`/`SDA` are I2C-style labels but the interface is 4-wire SPI (`SCL` = clock, `SDA` = MOSI). The GC9A01 is write-only, so no MISO is needed, and the backlight is hardwired on (no control pin). Logic is 3.3 V, matching the ESP32-S3 — no level shifting. See [`firmware/doc/WIRING.md`](firmware/doc/WIRING.md) for the full pinout, schematic notes, and dimensions.
 
 ## Getting started
 
@@ -63,36 +66,41 @@ Look up the four-letter WSR-88D station ID nearest to you. The renderer's `/stat
 
 ### 2. Flash the firmware
 
-1. Install tooling: `pip install esptool mpremote`
-2. Download a current MicroPython `ESP32_GENERIC_S3` build from [micropython.org/download](https://micropython.org/download/).
+The easiest path uses the pre-built binary from the [latest firmware release](https://github.com/caseyjmorton/mr-radar/releases/latest), which bundles MicroPython and all source files into a single image.
+
+1. Install tooling: `pip install esptool`
+2. Download `mr-radar-firmware-vX.Y.Z.bin` from the latest release.
 3. Erase and flash (note the `0x0` offset — the S3 is **not** `0x1000`):
 
    ```bash
    esptool.py --chip esp32s3 --port /dev/ttyACM0 erase_flash
    esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 460800 \
-       write_flash -z 0x0 ESP32_GENERIC_S3-<version>.bin
+       write_flash 0x0 mr-radar-firmware-vX.Y.Z.bin
    ```
 
-4. Confirm the REPL: `mpremote connect /dev/ttyACM0 repl` (Ctrl-] to exit).
-5. Copy the firmware files and provision WiFi credentials, station ID, and renderer URL.
+4. The device boots into portal mode on first power-up — connect to the `mr-radar-setup` WiFi network (passphrase shown on the display) and enter your WiFi credentials, NEXRAD station, and renderer URL.
 
 > If the board won't enter download mode: hold **BOOT**, tap **RST**, release **BOOT**, then retry.
 
+**Manual flash (development):** If you prefer to use your own MicroPython build, install `mpremote`, flash a `ESP32_GENERIC_S3` binary from [micropython.org/download](https://micropython.org/download/ESP32_GENERIC_S3/), then copy each file from `firmware/src/` to the device: `mpremote connect /dev/ttyACM0 cp firmware/src/<file> :<file>`.
+
 ### 3. Run the renderer (optional)
 
-The default device experience uses the public instance, so this step is only needed if you want to self-host.
+The default device experience uses the public instance at `https://mr-radar.fly.dev`, so this step is only needed if you want to self-host.
+
+**Docker (recommended):**
+
+```bash
+docker pull ghcr.io/caseyjmorton/mr-radar-renderer:latest
+docker run -p 3000:3000 ghcr.io/caseyjmorton/mr-radar-renderer:latest
+```
+
+**From source:**
 
 ```bash
 cd renderer
 npm install
 npm start          # listens on :3000
-```
-
-Or with Docker:
-
-```bash
-docker build -t mr-radar-renderer renderer/
-docker run -p 3000:3000 mr-radar-renderer
 ```
 
 ## Clock & timezone
@@ -156,7 +164,7 @@ Returns a JSON array of all 158 WSR-88D NEXRAD stations (CONUS, Alaska, Hawaii, 
 
 ### `GET /health`
 
-Returns `{"ok": true, "ts": <unix-ms>}`.
+Returns `{"ok": true, "ts": <unix-ms>, "version": "<X.Y.Z>"}`.
 
 ## Data sources & attribution
 
@@ -168,6 +176,10 @@ Radar data is provided by RainViewer; this project is not affiliated with or end
 ## A note on accuracy & timing
 
 Radar updates roughly every 5 minutes upstream, and at the supported zoom level the view shows regional precipitation patterns rather than street-level detail. This is a glanceable "is it about to rain on me" object, not a meteorological instrument. Do not use it for safety-critical or severe-weather decisions — consult official sources such as the National Weather Service.
+
+## Enclosure
+
+A parametric 3D-printable case is in `enclosure/`. It's a three-part assembly (body, back panel, top panel) designed to print cleanly on a 0.6 mm nozzle FDM printer without supports. STL files are published with each [enclosure release](https://github.com/caseyjmorton/mr-radar/releases).
 
 ## Contributing
 
