@@ -6,8 +6,11 @@ name: renderer-ci
 on:
   pull_request:
     branches: [main]
+    paths: ['renderer/**']
   push:
-    branches: [main]
+    paths: ['renderer/**']
+    
+  workflow_dispatch:
 
 # Least privilege: this workflow only needs to read the checked-out code.
 permissions:

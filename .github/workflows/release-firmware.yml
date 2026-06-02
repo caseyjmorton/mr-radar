@@ -1,0 +1,153 @@
+name: release-firmware
+
+# Builds a single flashable binary (MicroPython base + LittleFS image with
+# all source files), uploads individual source files for OTA delivery, and
+# creates a GitHub Release. Triggered by a firmware-v*.*.* tag or manually.
+#
+# Flash layout (ESP32-S3, 4 MB):
+#   0x000000  MicroPython base firmware (~1.7 MB)
+#   0x200000  LittleFS partition (2 MB) — source .py files, no config.json
+#
+# Flashing a fresh device:
+#   esptool.py --chip esp32s3 erase_flash
+#   esptool.py --chip esp32s3 write_flash 0x0 mr-radar-firmware-vX.Y.Z.bin
+on:
+  push:
+    tags: ['firmware-v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. firmware-v1.2.3)'
+        required: true
+
+permissions:
+  contents: write  # create GitHub Release and upload assets
+
+concurrency:
+  group: release-firmware
+  cancel-in-progress: false
+
+env:
+  # Pin the MicroPython base firmware. Update this when upgrading MicroPython.
+  MICROPYTHON_VERSION: "1.28.0"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#firmware-v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install build tools
+        run: pip install esptool littlefs-python
+
+      - name: Download MicroPython base firmware
+        run: |
+          curl -fsSL \
+            "https://micropython.org/resources/firmware/ESP32_GENERIC_S3-v${MICROPYTHON_VERSION}.bin" \
+            -o micropython.bin
+          echo "MicroPython base: $(wc -c < micropython.bin) bytes"
+
+      - name: Build LittleFS image
+        run: |
+          python3 - <<'PYEOF'
+          from littlefs import LittleFS
+          import os
+
+          # 4 MB flash; LittleFS occupies 0x200000–0x3FFFFF (2 MB)
+          BLOCK_SIZE  = 4096
+          BLOCK_COUNT = 512
+
+          fs = LittleFS(block_size=BLOCK_SIZE, block_count=BLOCK_COUNT, name_max=255)
+          src_dir = "firmware/src"
+          for fname in sorted(os.listdir(src_dir)):
+              fpath = os.path.join(src_dir, fname)
+              if not os.path.isfile(fpath):
+                  continue
+              with open(fpath, "rb") as f:
+                  data = f.read()
+              with fs.open(f"/{fname}", "wb") as lf:
+                  lf.write(data)
+              print(f"  added /{fname} ({len(data):,} bytes)")
+
+          with open("lfs.bin", "wb") as out:
+              out.write(bytes(fs.context))
+          print(f"LittleFS image: {os.path.getsize('lfs.bin'):,} bytes")
+          PYEOF
+
+      - name: Merge into single flashable binary
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          python3 -m esptool --chip esp32s3 merge_bin \
+            -o "mr-radar-firmware-v${VERSION}.bin" \
+            0x0       micropython.bin \
+            0x200000  lfs.bin
+          echo "Merged binary: $(wc -c < "mr-radar-firmware-v${VERSION}.bin") bytes"
+
+      - name: Generate OTA manifest
+        run: |
+          python3 - <<'PYEOF'
+          import hashlib, json, os, sys
+
+          version  = os.environ["VERSION"]
+          tag      = os.environ["TAG"]
+          repo     = os.environ["REPO"]
+          base_url = f"https://github.com/{repo}/releases/download/{tag}"
+
+          files = []
+          src_dir = "firmware/src"
+          for fname in sorted(os.listdir(src_dir)):
+              fpath = os.path.join(src_dir, fname)
+              if not os.path.isfile(fpath):
+                  continue
+              data = open(fpath, "rb").read()
+              files.append({
+                  "path":   fname,
+                  "url":    f"{base_url}/{fname}",
+                  "sha256": hashlib.sha256(data).hexdigest(),
+                  "size":   len(data),
+              })
+
+          manifest = {"version": version, "files": files}
+          with open("manifest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+          print(json.dumps(manifest, indent=2))
+          PYEOF
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG:     ${{ steps.version.outputs.tag }}
+          REPO:    ${{ github.repository }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          # Assets:
+          #   - merged flashable binary (for new installs)
+          #   - manifest.json          (for OTA updates via the portal)
+          #   - individual .py files   (downloaded by the OTA updater)
+          gh release create "$TAG" \
+            --title "Firmware ${VERSION}" \
+            --generate-notes \
+            --verify-tag \
+            "mr-radar-firmware-v${VERSION}.bin" \
+            manifest.json \
+            firmware/src/*.py
