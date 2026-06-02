@@ -232,12 +232,11 @@ Both are configurable from the settings form in portal mode and STA mode.
 
 - **Confirm before scaffolding large structures.** Propose the file/module layout and get agreement before generating many files.
 - **Match the language to the half.** Firmware is MicroPython (assume no CPython-only stdlib; memory is scarce; prefer `const`, preallocated buffers, and streaming over large allocations). Renderer is Node.js ≥20 with `sharp` and Express.
-- **Touch the enclosure directory only when explicitly asked.** It is intentionally deferred.
 - **Keep the contract in sync.** Any HTTP-contract change updates firmware, renderer, and this document together.
 - **Cite the constraints, don't relitigate them.** The architecture split exists for hard reasons (device RAM, no on-device PNG decode, provider ToS). Don't propose on-device compositing or homelab-dependence without explicitly raising it as a constraint change first.
 - **Prefer small, reviewable changes.** This is hardware-adjacent; a bad firmware change costs a reflash. Favor incremental, testable steps.
 - **Validate hardware assumptions cheaply.** When touching display code, prefer a test-pattern path that proves wiring before layering on network complexity.
-- **Keep the device in sync with local firmware.** Whenever possible, after editing a firmware file, copy it to the device so the on-device code matches the working tree (e.g. `mpremote connect /dev/ttyACM0 cp <file> :<file>`). A stale device silently tests old code. Before relying on a device test, confirm every firmware file you changed has been uploaded; when validating viper changes specifically, force a fresh import (`del sys.modules['sweep']` then re-import, or soft-reset) since `import` returns the cached old module otherwise.
+- **Keep the device in sync with local firmware.** Whenever possible, after editing a firmware file, copy it to the device so the on-device code matches the working tree (e.g. `mpremote connect /dev/ttyACM0 cp firmware/src/<file> :<file>`). A stale device silently tests old code. Before relying on a device test, confirm every firmware file you changed has been uploaded; when validating viper changes specifically, force a fresh import (`del sys.modules['sweep']` then re-import, or soft-reset) since `import` returns the cached old module otherwise.
 
 ## Firmware animation architecture
 
@@ -293,6 +292,33 @@ These are non-obvious constraints that bit us. Read before writing any `@micropy
 
 **`mpremote soft-reset` parks at the REPL — it does NOT run `main.py`.** After a soft-reset, mpremote holds the board in the REPL so `main.py` cannot interfere; to actually cold-boot the app standalone, use `mpremote connect /dev/ttyACM0 reset` (hardware reset). Note that a hardware reset re-enumerates USB-CDC, so `/dev/ttyACM0` may briefly change. To capture serial from a running app, prefer `mpremote exec` (synchronous, captures prints) over opening the raw port with pyserial — pyserial toggles DTR/RTS on open, which can disturb the board.
 
+## Release process
+
+Components version independently. Each has its own tag prefix: `firmware-v*.*.*`, `renderer-v*.*.*`, `enclosure-v*.*.*`. Pushing a tag triggers the corresponding release workflow.
+
+**Before tagging:** bump the version in the component's source file and merge to `main`:
+
+| Component | File | Field |
+| --- | --- | --- |
+| Firmware | `firmware/src/version.py` | `__version__` |
+| Renderer | `renderer/package.json` | `"version"` |
+| Enclosure | `enclosure/version.py` | `__version__` |
+
+**Tag and push:**
+
+```bash
+git checkout main && git pull
+git tag firmware-v0.2.0   # only tag components that changed
+git push origin firmware-v0.2.0
+```
+
+**What each workflow does:**
+
+- `release-firmware.yml` — downloads `ESP32_GENERIC_S3-<date>-v<version>.bin` from micropython.org (URL pinned as `MICROPYTHON_URL` in the workflow env; update that line when upgrading MicroPython), builds a LittleFS image from `firmware/src/`, merges into a single flashable binary (`mr-radar-firmware-vX.Y.Z.bin`), generates `manifest.json` with raw.githubusercontent.com URLs for OTA, and creates a GitHub Release with both as assets.
+- `release-renderer.yml` — builds and pushes the Docker image to GHCR as `ghcr.io/caseyjmorton/mr-radar-renderer:<version>` and `:latest`, then creates a GitHub Release with the image reference.
+- `release-enclosure.yml` — builds STLs with CadQuery, attaches them to a GitHub Release.
+- `deploy-renderer.yml` — deploys to fly.io on `renderer-v*.*.*` tag or push to `main` that touches `renderer/`. Requires approval at the `production` environment gate. The environment allows deploys from the `main` branch and `renderer-v*.*.*` tags.
+
 ## Build status & suggested next steps
 
 **Done:**
@@ -309,10 +335,10 @@ These are non-obvious constraints that bit us. Read before writing any `@micropy
 10. ✅ Wall-clock sweep alignment: second 0 = 12 o'clock (top); sweep proceeds clockwise; rotation boundary (frame swap) at second 15 (3 o'clock). Sub-second interpolation via `ticks_ms()` boundary tracking for smooth motion.
 11. ✅ Sweep smoothness pass: frame cap raised to ~25 fps (`TARGET_MS = 40`); trail glow batched into one viper call per frame (`_blend_trail_all_viper`); AA sweep line moved to a fixed-point viper loop (`_aa_line_viper`, no `sqrt`).
 12. ✅ Keep-alive fetch: one TLS handshake at startup, reused across polls; fetch kicked off at second 45 (9 o'clock) and throttled across ~10 s — eliminates the once-per-minute ~700 ms handshake freeze.
+13. ✅ Enclosure: CadQuery parametric 3-part (body/back/top) 3D-printable case. Display mount posts use lower-half box + 45° chamfer support for FDM printing upright. `_NEAR_ZERO = 1e-6` constant used for chamfer depth to avoid degenerate OCC geometry — never use `extrude(taper=angle)` for wedge shapes, use `extrude(d).edges(selector).chamfer(d - _NEAR_ZERO)` instead.
+14. ✅ CI/CD: per-component release workflows; firmware release builds a merged MicroPython + LittleFS binary; renderer release pushes to GHCR; enclosure release builds STLs. All components at v0.1.0.
 
 **Remaining:**
 
 1. Robustness pass: last-good-frame, status indicator (corner dot: green/yellow/red), watchdog timer.
-2. Polish: JPEG transport, OTA. (Backlight dimming is *not* possible on the current display module — its backlight is hardwired on; would require a different module or a hardware mod.)
-
-Enclosure is out of scope here.
+2. Polish: JPEG transport, OTA portal ("Check for Updates" → download manifest.json → staged writes to `/update/` → reboot). (Backlight dimming is *not* possible on the current display module — its backlight is hardwired on; would require a different module or a hardware mod.)
