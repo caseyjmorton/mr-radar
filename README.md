@@ -73,12 +73,13 @@ The easiest path uses the pre-built binary from the [latest firmware release](ht
 3. Erase and flash (note the `0x0` offset — the S3 is **not** `0x1000`):
 
    ```bash
-   esptool.py --chip esp32s3 --port /dev/ttyACM0 erase_flash
-   esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 460800 \
-       write_flash 0x0 mr-radar-firmware-vX.Y.Z.bin
+   esptool --chip esp32s3 --port /dev/ttyACM0 erase_flash
+   esptool --chip esp32s3 --port /dev/ttyACM0 --baud 460800 write-flash 0x0 mr-radar-firmware-vX.Y.Z.bin
    ```
 
-4. The device boots into portal mode on first power-up — connect to the `mr-radar-setup` WiFi network (passphrase shown on the display) and enter your WiFi credentials, NEXRAD station, and renderer URL.
+   The port name varies by OS: `/dev/ttyACM0` on Linux, `/dev/tty.usbmodem*` on macOS, `COM#` on Windows.
+
+4. The device boots into portal mode on first power-up — connect to the `mr-radar-setup` WiFi network. The passphrase is unique to your device and shown on the display. Enter your WiFi credentials, NEXRAD station, and renderer URL. If you're using the public instance, the renderer URL is `https://mr-radar.fly.dev`.
 
 > If the board won't enter download mode: hold **BOOT**, tap **RST**, release **BOOT**, then retry.
 
