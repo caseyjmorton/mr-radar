@@ -59,9 +59,24 @@ jobs:
 
       - name: Download MicroPython base firmware
         run: |
-          curl -fsSL \
-            "https://micropython.org/resources/firmware/ESP32_GENERIC_S3-v${MICROPYTHON_VERSION}.bin" \
-            -o micropython.bin
+          # micropython.org filenames include a date prefix (e.g. ESP32_GENERIC_S3-20250101-v1.28.0.bin).
+          # Resolve the exact asset URL from the MicroPython GitHub release, which is authoritative.
+          ASSET_URL=$(curl -fsSL \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/micropython/micropython/releases/tags/v${MICROPYTHON_VERSION}" \
+            | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          for a in data['assets']:
+              n = a['name']
+              if n.startswith('ESP32_GENERIC_S3') and n.endswith('.bin') \
+                 and 'SPIRAM' not in n and 'OTA' not in n:
+                  print(a['browser_download_url'])
+                  sys.exit()
+          sys.exit(1)
+          ")
+          echo "Downloading: $ASSET_URL"
+          curl -fsSL "$ASSET_URL" -o micropython.bin
           echo "MicroPython base: $(wc -c < micropython.bin) bytes"
 
       - name: Build LittleFS image
