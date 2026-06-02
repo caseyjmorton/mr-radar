@@ -7,8 +7,11 @@ name: firmware-ci
 on:
   pull_request:
     branches: [main]
+    paths: ['firmware/**']
   push:
-    branches: [main]
+    paths: ['firmware/**']
+    
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,4 +28,4 @@ jobs:
         with:
           persist-credentials: false
       - name: Byte-compile firmware sources
-        run: python3 -m compileall -q firmware
+        run: python3 -m compileall -q firmware/src

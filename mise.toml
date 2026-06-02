@@ -2,5 +2,5 @@
 flyctl = "latest"
 github-cli = "latest"
 node = "26"
-python = "latest"
+python = "3.13"
 uv = "latest"
