@@ -69,6 +69,10 @@ _STATION_INPUT_
 </div>
 <button type="submit">Save &amp; Reboot</button>
 </form>
+<hr style="margin:24px 0;border:none;border-top:1px solid #eee">
+<form method="POST" action="/ota">
+<button type="submit" style="background:#555">Check for Updates</button>
+</form>
 <p class="sub" style="text-align:center;margin-top:16px">mr-radar firmware v_FW_VERSION_</p>
 </body></html>"""
 
@@ -93,6 +97,76 @@ setTimeout(function poll(){
 </script>
 </body></html>"""
 
+_OTA_AVAIL_HTML = """\
+<!DOCTYPE html><html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Update available</title>
+<style>*{box-sizing:border-box}body{font-family:sans-serif;max-width:420px;margin:32px auto;padding:0 16px;color:#222}button{display:block;width:100%;margin-top:16px;padding:12px;border:none;border-radius:4px;font-size:1em;cursor:pointer;font-weight:600}
+.apply{background:#2a7;color:#fff}.back{background:#eee;color:#333}</style>
+</head>
+<body>
+<h1>Update available</h1>
+<p>v_CUR_VER_ &rarr; <strong>v_NEW_VER_</strong> (_N_FILES_ files)</p>
+<p>The device will download and install the update, then reboot.</p>
+<form method="POST" action="/ota/apply">
+<button class="apply" type="submit">Apply Update and Reboot</button>
+</form>
+<form method="GET" action="/">
+<button class="back" type="submit">Back to Settings</button>
+</form>
+</body></html>"""
+
+_OTA_CURRENT_HTML = """\
+<!DOCTYPE html><html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Up to date</title>
+<style>*{box-sizing:border-box}body{font-family:sans-serif;max-width:420px;margin:32px auto;padding:0 16px;color:#222}button{display:block;width:100%;margin-top:16px;padding:12px;background:#eee;color:#333;border:none;border-radius:4px;font-size:1em;cursor:pointer;font-weight:600}</style>
+</head>
+<body>
+<h1>&#10003; Up to date</h1>
+<p>firmware v_FW_VERSION_ is the latest release.</p>
+<form method="GET" action="/"><button type="submit">Back to Settings</button></form>
+</body></html>"""
+
+_OTA_APPLYING_HTML = """\
+<!DOCTYPE html><html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Updating&hellip;</title>
+<style>body{font-family:sans-serif;text-align:center;margin-top:80px;color:#222}</style>
+</head>
+<body>
+<h1>Downloading update&hellip;</h1>
+<p>Installing v_NEW_VER_. Device will reboot when complete.</p>
+<p id="s">Waiting for device to come back online.</p>
+<script>
+setTimeout(function poll(){
+  fetch('/').then(function(r){
+    if(r.ok){location.href='/';}else{setTimeout(poll,2000);}
+  }).catch(function(){setTimeout(poll,2000);});
+},15000);
+</script>
+</body></html>"""
+
+_OTA_ERROR_HTML = """\
+<!DOCTYPE html><html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Update error</title>
+<style>*{box-sizing:border-box}body{font-family:sans-serif;max-width:420px;margin:32px auto;padding:0 16px;color:#222}pre{background:#f5f5f5;padding:10px;border-radius:4px;overflow:auto;font-size:.85em}button{display:block;width:100%;margin-top:16px;padding:12px;background:#eee;color:#333;border:none;border-radius:4px;font-size:1em;cursor:pointer;font-weight:600}</style>
+</head>
+<body>
+<h1>Update error</h1>
+<pre>_ERR_</pre>
+<form method="GET" action="/"><button type="submit">Back to Settings</button></form>
+</body></html>"""
+
 
 def _load_config():
     try:
@@ -111,6 +185,7 @@ def _save_config(cfg):
 
 
 _stations_cache = None
+_ota_manifest = None
 
 
 def _fetch_stations(renderer_url):
@@ -222,7 +297,9 @@ def _respond(conn, status, body):
 
 
 def _handle(conn, cfg):
+    global _ota_manifest
     saved_cfg = None
+    do_ota_apply = False
     try:
         raw = b''
         while b'\r\n\r\n' not in raw:
@@ -271,6 +348,34 @@ def _handle(conn, cfg):
             _save_config(saved_cfg)
             _respond(conn, '200 OK', _SAVED_HTML)
 
+        elif method == 'POST' and path == '/ota':
+            try:
+                import ota as _ota
+                result = _ota.check()
+                if result is None:
+                    _ota_manifest = None
+                    _respond(conn, '200 OK',
+                             _OTA_CURRENT_HTML.replace('_FW_VERSION_', __version__))
+                else:
+                    new_ver, files = result
+                    _ota_manifest = {'version': new_ver, 'files': files}
+                    _respond(conn, '200 OK',
+                             _OTA_AVAIL_HTML
+                             .replace('_NEW_VER_', new_ver)
+                             .replace('_CUR_VER_', __version__)
+                             .replace('_N_FILES_', str(len(files))))
+            except Exception as e:
+                _respond(conn, '200 OK',
+                         _OTA_ERROR_HTML.replace('_ERR_', str(e)))
+
+        elif method == 'POST' and path == '/ota/apply':
+            if _ota_manifest:
+                do_ota_apply = True
+                _respond(conn, '200 OK',
+                         _OTA_APPLYING_HTML.replace('_NEW_VER_', _ota_manifest['version']))
+            else:
+                _respond(conn, '400 Bad Request', '<h1>No pending update. Go back and check for updates first.</h1>')
+
         else:
             _respond(conn, '404 Not Found', '<h1>Not found</h1>')
 
@@ -285,6 +390,15 @@ def _handle(conn, cfg):
     if saved_cfg is not None:
         time.sleep(2)
         machine.reset()
+
+    if do_ota_apply and _ota_manifest:
+        import ota as _ota
+        files = _ota_manifest['files']
+        _ota_manifest = None
+        try:
+            _ota.apply(files)  # ends with machine.reset()
+        except Exception as e:
+            print('ota: apply error:', e)
 
     return cfg
 
