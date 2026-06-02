@@ -107,7 +107,9 @@ jobs:
           version  = os.environ["VERSION"]
           tag      = os.environ["TAG"]
           repo     = os.environ["REPO"]
-          base_url = f"https://github.com/{repo}/releases/download/{tag}"
+          # Use raw GitHub content URLs so individual .py files don't need to
+          # be uploaded as release assets. The tag ref is permanent and stable.
+          base_url = f"https://raw.githubusercontent.com/{repo}/{tag}/firmware/src"
 
           files = []
           src_dir = "firmware/src"
@@ -139,14 +141,9 @@ jobs:
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           VERSION="${{ steps.version.outputs.version }}"
-          # Assets:
-          #   - merged flashable binary (for new installs)
-          #   - manifest.json          (for OTA updates via the portal)
-          #   - individual .py files   (downloaded by the OTA updater)
           gh release create "$TAG" \
             --title "Firmware ${VERSION}" \
             --generate-notes \
             --verify-tag \
             "mr-radar-firmware-v${VERSION}.bin" \
-            manifest.json \
-            firmware/src/*.py
+            manifest.json
