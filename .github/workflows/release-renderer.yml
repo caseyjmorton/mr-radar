@@ -56,7 +56,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          IMAGE="ghcr.io/${{ github.repository_owner }}/mr-radar-renderer"
           gh release create "${{ steps.version.outputs.tag }}" \
-            --title "Renderer ${{ steps.version.outputs.version }}" \
-            --generate-notes \
-            --verify-tag
+            --title "Renderer ${VERSION}" \
+            --verify-tag \
+            --notes "## Docker image
+
+\`\`\`
+${IMAGE}:${VERSION}
+${IMAGE}:latest
+\`\`\`
+
+Pull and run:
+\`\`\`bash
+docker pull ${IMAGE}:${VERSION}
+docker run -p 3000:3000 ${IMAGE}:${VERSION}
+\`\`\`"
