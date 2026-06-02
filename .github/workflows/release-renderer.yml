@@ -1,0 +1,62 @@
+name: release-renderer
+
+# Builds and pushes the renderer Docker image to GHCR, then creates a
+# GitHub Release. Triggered by a renderer-v*.*.* tag or manually.
+# The deploy-renderer workflow handles the fly.io deploy on the same tag.
+on:
+  push:
+    tags: ['renderer-v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. renderer-v1.2.3)'
+        required: true
+
+permissions:
+  contents: write  # create GitHub Release
+  packages: write  # push to GHCR
+
+concurrency:
+  group: release-renderer
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#renderer-v}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push Docker image
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          IMAGE="ghcr.io/${{ github.repository_owner }}/mr-radar-renderer"
+          docker build -t "${IMAGE}:${VERSION}" -t "${IMAGE}:latest" renderer/
+          docker push "${IMAGE}:${VERSION}"
+          docker push "${IMAGE}:latest"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "Renderer ${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            --verify-tag

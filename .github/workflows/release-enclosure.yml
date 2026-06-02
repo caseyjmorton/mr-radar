@@ -1,0 +1,58 @@
+name: release-enclosure
+
+# Builds the STLs from source and creates a GitHub Release with them as
+# downloadable assets. Triggered by an enclosure-v*.*.* tag or manually.
+on:
+  push:
+    tags: ['enclosure-v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. enclosure-v1.2.3)'
+        required: true
+
+permissions:
+  contents: write  # create GitHub Release and upload assets
+
+concurrency:
+  group: release-enclosure
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#enclosure-v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install CadQuery
+        run: pip install "cadquery>=2.4,<3"
+
+      - name: Build STLs
+        run: python enclosure/main.py
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "Enclosure ${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            --verify-tag \
+            enclosure/build/*.stl

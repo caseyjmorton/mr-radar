@@ -1,17 +1,18 @@
 name: deploy-renderer
 
-# Deploys the renderer to fly.io. This runs ONLY on push to main (i.e. after a
-# PR has merged), never on pull_request — so the FLY_API_TOKEN is never exposed
-# to fork/PR code. The token lives in the `production` GitHub Environment, which
-# is configured with a required reviewer (the maintainer) and restricted to
-# protected branches, so every deploy pauses for explicit approval and the
-# secret is unreadable from any job that doesn't target this environment.
+# Deploys the renderer to fly.io. Triggers on:
+#   - push to main (after a PR merges with renderer changes)
+#   - renderer-v*.*.* tag (the canonical release path)
+# Never runs on pull_request, so FLY_API_TOKEN is never exposed to fork code.
+# The token lives in the `production` environment, which requires a reviewer
+# and is restricted to protected branches/tags.
 on:
   push:
     branches: [main]
     paths:
       - 'renderer/**'
       - '.github/workflows/deploy-renderer.yml'
+    tags: ['renderer-v*.*.*']
   workflow_dispatch: {}
 
 permissions:
