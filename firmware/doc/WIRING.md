@@ -1,12 +1,18 @@
-# Wiring: ESP32-S3-Zero → GC9A01 1.28" round TFT
+# Wiring: ESP32-S3-Zero / ESP32-C3 → GC9A01 1.28" round TFT
 
 Hardware wiring reference for mr-radar. Source of truth for the firmware pin
 map; mirrors the summary in the repo-root `CLAUDE.md`.
 
 > Board note: this project originally targeted an ESP32-C3 super mini, but those
 > boards have a notorious antenna/PA defect (a unit here refused WiFi association
-> at any usable range). We switched to the Waveshare ESP32-S3-Zero, which uses
-> the same display GPIOs. Avoid the C3 super mini.
+> at any usable range). We switched to the Waveshare ESP32-S3-Zero as the
+> primary target. `firmware/src/config.py` now also supports the C3 at the
+> source level (see the C3 pinout below) for anyone who already has C3
+> hardware — but the antenna/PA defect is a hardware problem, not a firmware
+> one. **Before flashing a whole batch of C3 super minis, test one board's
+> WiFi association at your actual install distance first.** If your C3 isn't
+> a "super mini" (e.g. a DevKitM-1 or another vendor's board), the defect may
+> not apply.
 
 ## Display module
 
@@ -30,6 +36,37 @@ Pins listed in physical header order (pin 1 = `VCC`).
 | 7 | RST | Reset (active low) | GPIO8 |
 
 The pin map is configuration, not magic numbers — assign it explicitly in code.
+
+## Connection table — ESP32-C3
+
+`firmware/src/config.py` detects the chip at runtime (`os.uname().machine`)
+and switches pin maps automatically, so the same `firmware/src` tree runs on
+either board. The C3 map differs from the S3 map because GPIO2/8/9 are
+strapping pins on the C3 (they aren't on the S3), and most "super mini"-style
+C3 boards also wire an onboard WS2812 LED to GPIO8.
+
+| Pin | Module label | Function | ESP32-C3 GPIO |
+| --- | --- | --- | --- |
+| 1 | VCC | Power (3.3–5 V, regulated on-board) | 3V3 (or 5V) |
+| 2 | GND | Ground | GND |
+| 3 | SCL | SPI clock | GPIO4 |
+| 4 | SDA | SPI data (MOSI) | GPIO5 |
+| 5 | DC | Data/command select | GPIO6 |
+| 6 | CS | Chip select (active low) | GPIO7 |
+| 7 | RST | Reset (active low) | GPIO10 |
+
+MISO is unused (the display is write-only) but is pinned explicitly to
+GPIO1 in code rather than left to a per-chip default — `machine.SPI` falls
+back to a hardware default MISO pin when the kwarg is omitted, which is
+exactly what caused the SPI(2)/PSRAM collision noted below for the S3. That
+default hasn't been verified against real C3 hardware, so pinning it
+explicitly avoids relying on it.
+
+**GPIO2, GPIO8, GPIO9 are reserved — do not use them for anything:**
+GPIO9 is the classic BOOT-mode strap (pull low at reset to enter download
+mode); GPIO2 must read high at boot for normal SPI-flash boot; GPIO8 carries
+the onboard addressable LED on most C3 "super mini" boards. This is why RST
+moved from GPIO8 (its S3 pin) to GPIO10 on the C3.
 
 ## Gotchas (why the choices above are safe)
 
@@ -56,6 +93,9 @@ The pin map is configuration, not magic numbers — assign it explicitly in code
   is a free pin. Avoid `SPI(2)`, whose default `miso=37` collides with the
   module's PSRAM. (The display is write-only, so MISO is never wired; this only
   matters because the bus claims the pin.)
+- On the C3, `config.py` uses `SPI(1)` as well but pins MISO explicitly to
+  GPIO1 rather than trusting an unverified default — **this has not been
+  hardware-verified yet**; if the display doesn't come up, check this first.
 - Mode 0, MSB-first, single data line (MOSI only).
 - Start conservative (~20–27 MHz) on jumper wiring; GC9A01 can run faster
   (~40–80 MHz) once the link is proven stable.
@@ -69,6 +109,16 @@ The pin map is configuration, not magic numbers — assign it explicitly in code
 - Erase first: `esptool.py --chip esp32s3 erase_flash`.
 - Use the `ESP32_GENERIC_S3` MicroPython build.
 - If auto-reset into download mode fails: hold BOOT, tap RST (or replug USB), release BOOT.
+
+## Flashing reminders (ESP32-C3)
+
+- Flash offset is **`0x0`**, same as the S3.
+- Erase first: `esptool.py --chip esp32c3 erase_flash`.
+- Use the `ESP32_GENERIC_C3` MicroPython build.
+- If auto-reset into download mode fails: hold BOOT, tap RST (or replug USB), release BOOT.
+- `_thread` (used for the fetch and settings-server background threads) is
+  expected to work on the single-core C3 via FreeRTOS time-slicing, same as
+  on the S3, but this project hasn't verified it on real C3 hardware yet.
 
 ## Physical dimensions (for the deferred enclosure)
 

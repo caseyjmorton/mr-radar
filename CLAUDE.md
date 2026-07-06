@@ -43,9 +43,10 @@ Keep firmware and renderer concerns strictly separated. They communicate only ov
 
 ## Hardware target
 
-- **MCU:** Waveshare ESP32-S3-Zero. Dual-core Xtensa LX7 @ 240 MHz, 512 KB SRAM + 2 MB PSRAM, 4 MB flash, native USB-CDC serial. (We originally targeted an ESP32-C3 "super mini," but those boards have a notorious antenna/PA defect — a unit that refused WiFi association at any usable range, while a known-good board on the same network connected instantly, forced the switch. Avoid the C3 super mini; the S3-Zero's GPIO map keeps the same display pins.)
-- **Display:** 240×240 round TFT, GC9A01 controller, SPI (write-only, no MISO). 1.28" diameter.
-- **Default pin map** — uses the module's silkscreen labels (assign explicitly in code; labels are I2C-style but the interface is 4-wire SPI):
+- **Primary MCU: Waveshare ESP32-S3-Zero.** Dual-core Xtensa LX7 @ 240 MHz, 512 KB SRAM + 2 MB PSRAM, 4 MB flash, native USB-CDC serial. (We originally targeted an ESP32-C3 "super mini," but those boards have a notorious antenna/PA defect — a unit that refused WiFi association at any usable range, while a known-good board on the same network connected instantly, forced the switch.)
+- **Secondary MCU: ESP32-C3.** `firmware/src/config.py` detects the chip at runtime and selects the matching pin map, so the same `firmware/src` tree ships to both — see "Dual-chip support" below. The C3 super-mini antenna/PA defect above is a **hardware** problem no firmware change fixes: if your C3 boards are that exact board, test one at your real install distance before flashing the whole batch. If they're a different C3 board, the defect may not apply.
+- **Display:** 240×240 round TFT, GC9A01 controller, SPI (write-only, no MISO). 1.28" diameter. Same display and wiring approach on both chips.
+- **Default pin map (S3)** — uses the module's silkscreen labels (assign explicitly in code; labels are I2C-style but the interface is 4-wire SPI):
 
   | Module pin | Function | GPIO |
   | --- | --- | --- |
@@ -59,12 +60,31 @@ Keep firmware and renderer concerns strictly separated. They communicate only ov
 
   **No backlight pin:** this module's backlight is hardwired on (LEDA → 2Ω → 3.3 V), so PWM dimming is not possible without a hardware mod. On the ESP32-S3, GPIO8 is a plain GPIO (not a strapping pin, unlike the C3), so RST here is unconstrained and the display's onboard 10k pullup is harmless. Logic is 3.3 V, matching the S3 — no level shifting needed. Verified working with `SPI(1)` (its default `miso=13` is a free pin; avoid `SPI(2)`, whose default `miso=37` collides with PSRAM). See `firmware/doc/WIRING.md` for the full pinout, schematic notes, and dimensions. Treat the pin map as configuration, not hard-coded magic numbers.
 
-### ESP32-S3 flashing facts that bite people
+- **Pin map (C3)** — GPIO2/8/9 are strapping pins on the C3 (unlike the S3), and most "super mini" boards also wire an onboard WS2812 LED to GPIO8, so RST moves to GPIO10 and MISO is pinned explicitly rather than trusted to an unverified per-chip default:
+
+  | Module pin | Function | GPIO |
+  | --- | --- | --- |
+  | SCL | SPI clock | 4 |
+  | SDA | SPI data (MOSI) | 5 |
+  | DC | Data/command | 6 |
+  | CS | Chip select | 7 |
+  | RST | Reset | 10 |
+  | (MISO, unused) | pinned explicitly, not wired to the display | 1 |
+
+  **This C3 pin map has not been hardware-verified** — it's derived from documented C3 strapping/LED constraints, not tested on a real board yet. Validate with the test-pattern path (`firmware/util/test_pattern.py`) before layering on network complexity. See `firmware/doc/WIRING.md` for full detail.
+
+### Flashing facts that bite people (both chips share these)
 - Flash offset is **`0x0`**, NOT `0x1000` (that's the classic ESP32). Getting this wrong produces a board that won't boot.
-- Erase before flashing: `esptool.py --chip esp32s3 erase_flash`.
-- Use the `ESP32_GENERIC_S3` MicroPython build.
+- Erase before flashing: `esptool.py --chip esp32s3 erase_flash` (or `--chip esp32c3` for the C3).
+- Use the `ESP32_GENERIC_S3` MicroPython build for the S3, `ESP32_GENERIC_C3` for the C3.
 - If auto-reset into download mode fails: hold BOOT, tap RST (or replug USB), release BOOT.
 - Native USB-CDC re-enumerates after flashing/reset, so the serial device name (e.g. `/dev/ttyACM0`) can change — re-check it if a connection fails.
+
+### Dual-chip support
+
+The device-side source in `firmware/src/` is chip-agnostic MicroPython except for the pin map. `config.py` picks the S3 or C3 pin map at runtime via `os.uname().machine` — everything else (`radar.py`, `sweep.py`, `portal.py`, etc.) is unchanged between chips. `@micropython.native`/`@micropython.viper` are expected to compile for either architecture (Xtensa for S3, RV32IMC for C3) from the same source, since MicroPython's native emitter supports both — this is an assumption pending hardware verification on the C3.
+
+A single flashable binary cannot span both chips — the S3 is Xtensa and the C3 is RISC-V, fundamentally different machine code. `release-firmware.yml` builds two separate merged binaries (`mr-radar-firmware-s3-vX.Y.Z.bin`, `mr-radar-firmware-c3-vX.Y.Z.bin`) from the one shared `firmware/src` LittleFS image, plus one OTA manifest (source is identical across chips).
 
 ## The HTTP contract (firmware <-> renderer)
 
@@ -314,7 +334,7 @@ git push origin firmware-v0.2.0
 
 **What each workflow does:**
 
-- `release-firmware.yml` — downloads `ESP32_GENERIC_S3-<date>-v<version>.bin` from micropython.org (URL pinned as `MICROPYTHON_URL` in the workflow env; update that line when upgrading MicroPython), builds a LittleFS image from `firmware/src/`, merges into a single flashable binary (`mr-radar-firmware-vX.Y.Z.bin`), generates `manifest.json` with raw.githubusercontent.com URLs for OTA, and creates a GitHub Release with both as assets.
+- `release-firmware.yml` — downloads `ESP32_GENERIC_S3-<date>-v<version>.bin` and `ESP32_GENERIC_C3-<date>-v<version>.bin` from micropython.org (URLs pinned as `MICROPYTHON_S3_URL` / `MICROPYTHON_C3_URL` in the workflow env; update both when upgrading MicroPython, and verify each filename actually exists before tagging), builds one shared LittleFS image from `firmware/src/`, merges it with each base firmware into two flashable binaries (`mr-radar-firmware-s3-vX.Y.Z.bin`, `mr-radar-firmware-c3-vX.Y.Z.bin`), generates one `manifest.json` with raw.githubusercontent.com URLs for OTA (source is shared across chips), and creates a GitHub Release with all three as assets.
 - `release-renderer.yml` — builds and pushes the Docker image to GHCR as `ghcr.io/caseyjmorton/mr-radar-renderer:<version>` and `:latest`, then creates a GitHub Release with the image reference.
 - `release-enclosure.yml` — builds STLs with CadQuery, attaches them to a GitHub Release.
 - `deploy-renderer.yml` — deploys to fly.io on `renderer-v*.*.*` tag or push to `main` that touches `renderer/`. Requires approval at the `production` environment gate. The environment allows deploys from the `main` branch and `renderer-v*.*.*` tags.

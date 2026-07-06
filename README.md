@@ -41,22 +41,23 @@ mr-radar/
 
 ## Hardware
 
-- **Waveshare ESP32-S3-Zero** dev board (we tried the ESP32-C3 "super mini" first, but its antenna/PA is unreliable — skip it)
+- **Waveshare ESP32-S3-Zero** dev board (primary target)
+- **ESP32-C3** also supported at the firmware-source level — same `firmware/src` tree, chip detected at runtime. If your C3 is a "super mini" board, know that this project switched away from it originally because of a hardware antenna/PA defect (WiFi wouldn't associate at any usable range); that's a hardware issue, not something firmware can fix, so test one board's WiFi range before flashing a whole batch. A different C3 board may not have this problem.
 - **240×240 round TFT**, GC9A01 controller, SPI, 1.28" diameter
 
 Default wiring (configurable in firmware; pins use the module's silkscreen labels):
 
-| Module pin | ESP32-S3 GPIO |
-| --- | --- |
-| VCC | 3V3 |
-| GND | GND |
-| SCL | 4 |
-| SDA | 5 |
-| DC | 6 |
-| CS | 7 |
-| RST | 8 |
+| Module pin | ESP32-S3 GPIO | ESP32-C3 GPIO |
+| --- | --- | --- |
+| VCC | 3V3 | 3V3 |
+| GND | GND | GND |
+| SCL | 4 | 4 |
+| SDA | 5 | 5 |
+| DC | 6 | 6 |
+| CS | 7 | 7 |
+| RST | 8 | 10 |
 
-`SCL`/`SDA` are I2C-style labels but the interface is 4-wire SPI (`SCL` = clock, `SDA` = MOSI). The GC9A01 is write-only, so no MISO is needed, and the backlight is hardwired on (no control pin). Logic is 3.3 V, matching the ESP32-S3 — no level shifting. See [`firmware/doc/WIRING.md`](firmware/doc/WIRING.md) for the full pinout, schematic notes, and dimensions.
+`SCL`/`SDA` are I2C-style labels but the interface is 4-wire SPI (`SCL` = clock, `SDA` = MOSI). The GC9A01 is write-only, so no MISO is needed, and the backlight is hardwired on (no control pin). Logic is 3.3 V on both chips — no level shifting. RST differs because GPIO8 is a strapping pin (and often an onboard LED pin) on the C3 but not the S3. See [`firmware/doc/WIRING.md`](firmware/doc/WIRING.md) for the full pinout, schematic notes, and dimensions.
 
 ## Getting started
 
@@ -66,15 +67,20 @@ Look up the four-letter WSR-88D station ID nearest to you. The renderer's `/stat
 
 ### 2. Flash the firmware
 
-The easiest path uses the pre-built binary from the [latest firmware release](https://github.com/caseyjmorton/mr-radar/releases/latest), which bundles MicroPython and all source files into a single image.
+The easiest path uses a pre-built binary from the [latest firmware release](https://github.com/caseyjmorton/mr-radar/releases/latest), which bundles MicroPython and all source files into a single image. There's a separate binary per chip — pick the one matching your board.
 
 1. Install tooling: `pip install esptool`
-2. Download `mr-radar-firmware-vX.Y.Z.bin` from the latest release.
-3. Erase and flash (note the `0x0` offset — the S3 is **not** `0x1000`):
+2. Download `mr-radar-firmware-s3-vX.Y.Z.bin` (S3-Zero) or `mr-radar-firmware-c3-vX.Y.Z.bin` (C3) from the latest release.
+3. Erase and flash (note the `0x0` offset on both chips — **not** `0x1000`):
 
    ```bash
+   # S3-Zero
    esptool --chip esp32s3 --port /dev/ttyACM0 erase_flash
-   esptool --chip esp32s3 --port /dev/ttyACM0 --baud 460800 write-flash 0x0 mr-radar-firmware-vX.Y.Z.bin
+   esptool --chip esp32s3 --port /dev/ttyACM0 --baud 460800 write-flash 0x0 mr-radar-firmware-s3-vX.Y.Z.bin
+
+   # C3
+   esptool --chip esp32c3 --port /dev/ttyACM0 erase_flash
+   esptool --chip esp32c3 --port /dev/ttyACM0 --baud 460800 write-flash 0x0 mr-radar-firmware-c3-vX.Y.Z.bin
    ```
 
    The port name varies by OS: `/dev/ttyACM0` on Linux, `/dev/tty.usbmodem*` on macOS, `COM#` on Windows.
@@ -83,7 +89,9 @@ The easiest path uses the pre-built binary from the [latest firmware release](ht
 
 > If the board won't enter download mode: hold **BOOT**, tap **RST**, release **BOOT**, then retry.
 
-**Manual flash (development):** If you prefer to use your own MicroPython build, install `mpremote`, flash a `ESP32_GENERIC_S3` binary from [micropython.org/download](https://micropython.org/download/ESP32_GENERIC_S3/), then copy each file from `firmware/src/` to the device: `mpremote connect /dev/ttyACM0 cp firmware/src/<file> :<file>`.
+**Manual flash (development):** If you prefer to use your own MicroPython build, install `mpremote`, flash an `ESP32_GENERIC_S3` (or `ESP32_GENERIC_C3`) binary from [micropython.org/download](https://micropython.org/download/), then copy each file from `firmware/src/` to the device: `mpremote connect /dev/ttyACM0 cp firmware/src/<file> :<file>`.
+
+> **Note on the C3:** the C3 pin map in `firmware/src/config.py` and `firmware/doc/WIRING.md` hasn't been hardware-verified yet. Before wiring up a full display, run `firmware/util/test_pattern.py` to confirm the SPI wiring works on your specific board.
 
 ### 3. Run the renderer (optional)
 

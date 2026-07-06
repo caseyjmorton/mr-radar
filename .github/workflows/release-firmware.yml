@@ -1,16 +1,20 @@
 name: release-firmware
 
-# Builds a single flashable binary (MicroPython base + LittleFS image with
-# all source files), uploads individual source files for OTA delivery, and
-# creates a GitHub Release. Triggered by a firmware-v*.*.* tag or manually.
+# Builds a flashable binary per supported chip (MicroPython base + LittleFS
+# image with all source files, identical across chips), uploads individual
+# source files for OTA delivery, and creates a GitHub Release. Triggered by a
+# firmware-v*.*.* tag or manually.
 #
-# Flash layout (ESP32-S3, 4 MB):
+# Flash layout (4 MB flash, both chips):
 #   0x000000  MicroPython base firmware (~1.7 MB)
 #   0x200000  LittleFS partition (2 MB) — source .py files, no config.json
 #
 # Flashing a fresh device:
-#   esptool.py --chip esp32s3 erase_flash
-#   esptool.py --chip esp32s3 write_flash 0x0 mr-radar-firmware-vX.Y.Z.bin
+#   esptool.py --chip esp32s3 erase_flash   (S3-Zero)
+#   esptool.py --chip esp32s3 write_flash 0x0 mr-radar-firmware-s3-vX.Y.Z.bin
+#
+#   esptool.py --chip esp32c3 erase_flash   (C3)
+#   esptool.py --chip esp32c3 write_flash 0x0 mr-radar-firmware-c3-vX.Y.Z.bin
 on:
   push:
     tags: ['firmware-v*.*.*']
@@ -28,9 +32,13 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Pin the MicroPython base firmware. To upgrade: find the new URL at
-  # https://micropython.org/download/ESP32_GENERIC_S3/ and update this line.
-  MICROPYTHON_URL: "https://micropython.org/resources/firmware/ESP32_GENERIC_S3-20260406-v1.28.0.bin"
+  # Pin the MicroPython base firmware per chip. To upgrade: find the new URL
+  # at https://micropython.org/download/ESP32_GENERIC_S3/ (or _C3/) and
+  # update these lines. Verify both filenames actually exist before tagging —
+  # a given MicroPython version isn't guaranteed to publish the same day for
+  # every port.
+  MICROPYTHON_S3_URL: "https://micropython.org/resources/firmware/ESP32_GENERIC_S3-20260406-v1.28.0.bin"
+  MICROPYTHON_C3_URL: "https://micropython.org/resources/firmware/ESP32_GENERIC_C3-20260406-v1.28.0.bin"
 
 jobs:
   release:
@@ -58,18 +66,14 @@ jobs:
       - name: Install build tools
         run: pip install esptool littlefs-python
 
-      - name: Download MicroPython base firmware
-        run: |
-          curl -fsSL "$MICROPYTHON_URL" -o micropython.bin
-          echo "MicroPython base: $(wc -c < micropython.bin) bytes"
-
       - name: Build LittleFS image
         run: |
           python3 - <<'PYEOF'
           from littlefs import LittleFS
           import os
 
-          # 4 MB flash; LittleFS occupies 0x200000–0x3FFFFF (2 MB)
+          # 4 MB flash; LittleFS occupies 0x200000–0x3FFFFF (2 MB). Shared
+          # by both chip variants — the source tree is identical.
           BLOCK_SIZE  = 4096
           BLOCK_COUNT = 512
 
@@ -90,14 +94,27 @@ jobs:
           print(f"LittleFS image: {os.path.getsize('lfs.bin'):,} bytes")
           PYEOF
 
-      - name: Merge into single flashable binary
+      - name: Build S3 binary
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+          curl -fsSL "$MICROPYTHON_S3_URL" -o micropython-s3.bin
+          echo "MicroPython S3 base: $(wc -c < micropython-s3.bin) bytes"
           python3 -m esptool --chip esp32s3 merge_bin \
-            -o "mr-radar-firmware-v${VERSION}.bin" \
-            0x0       micropython.bin \
+            -o "mr-radar-firmware-s3-v${VERSION}.bin" \
+            0x0       micropython-s3.bin \
             0x200000  lfs.bin
-          echo "Merged binary: $(wc -c < "mr-radar-firmware-v${VERSION}.bin") bytes"
+          echo "Merged S3 binary: $(wc -c < "mr-radar-firmware-s3-v${VERSION}.bin") bytes"
+
+      - name: Build C3 binary
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          curl -fsSL "$MICROPYTHON_C3_URL" -o micropython-c3.bin
+          echo "MicroPython C3 base: $(wc -c < micropython-c3.bin) bytes"
+          python3 -m esptool --chip esp32c3 merge_bin \
+            -o "mr-radar-firmware-c3-v${VERSION}.bin" \
+            0x0       micropython-c3.bin \
+            0x200000  lfs.bin
+          echo "Merged C3 binary: $(wc -c < "mr-radar-firmware-c3-v${VERSION}.bin") bytes"
 
       - name: Generate OTA manifest
         run: |
@@ -108,7 +125,8 @@ jobs:
           tag      = os.environ["TAG"]
           repo     = os.environ["REPO"]
           # Use raw GitHub content URLs so individual .py files don't need to
-          # be uploaded as release assets. The tag ref is permanent and stable.
+          # be uploaded as release assets. The tag ref is permanent and
+          # stable. One manifest covers both chips — the source is shared.
           base_url = f"https://raw.githubusercontent.com/{repo}/{tag}/firmware/src"
 
           files = []
@@ -145,5 +163,6 @@ jobs:
             --title "Firmware ${VERSION}" \
             --generate-notes \
             --verify-tag \
-            "mr-radar-firmware-v${VERSION}.bin" \
+            "mr-radar-firmware-s3-v${VERSION}.bin" \
+            "mr-radar-firmware-c3-v${VERSION}.bin" \
             manifest.json
