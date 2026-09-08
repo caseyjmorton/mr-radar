@@ -4,3 +4,9 @@ github-cli = "latest"
 node = "26"
 python = "3.13"
 uv = "latest"
+
+# Firmware flashing tools. Declared via the pipx backend (own isolated venv per
+# tool) rather than pip-installed into the active python -- a python version
+# bump would otherwise strand them in the old install's site-packages.
+"pipx:mpremote" = "latest"
+"pipx:esptool" = "latest"

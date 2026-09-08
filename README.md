@@ -41,22 +41,24 @@ mr-radar/
 
 ## Hardware
 
-- **Waveshare ESP32-S3-Zero** dev board (we tried the ESP32-C3 "super mini" first, but its antenna/PA is unreliable — skip it)
+- **Seeed XIAO ESP32S3** dev board — the only supported board. 8 MB flash, 8 MB octal PSRAM. **Flash size matters:** the released binary embeds a filesystem sized for 8 MB flash and will not boot correctly on a 4 MB board.
+
+  Earlier revisions also ran on the ESP32-C3 and the 4 MB Waveshare ESP32-S3-Zero. Both were dropped: neither has the memory headroom to hold the 115,200-byte framebuffer alongside WiFi without fragmentation stalls, and the sweep animation misses its frame budget on both. (The C3 "super mini" boards additionally have a notorious antenna/PA defect — WiFi wouldn't associate at any usable range.)
 - **240×240 round TFT**, GC9A01 controller, SPI, 1.28" diameter
 
-Default wiring (configurable in firmware; pins use the module's silkscreen labels):
+Default wiring (configurable in firmware; the display's pins use its own silkscreen labels). The GPIO column is **raw GPIO numbers, not the XIAO's `D` labels** — wiring to the same-numbered `D` pads puts every line on the wrong pin:
 
-| Module pin | ESP32-S3 GPIO |
-| --- | --- |
-| VCC | 3V3 |
-| GND | GND |
-| SCL | 4 |
-| SDA | 5 |
-| DC | 6 |
-| CS | 7 |
-| RST | 8 |
+| Module pin | GPIO | XIAO pad |
+| --- | --- | --- |
+| VCC | 3V3 | 3V3 |
+| GND | GND | GND |
+| SCL | 4 | D3 |
+| SDA | 5 | D4 |
+| DC | 6 | D5 |
+| CS | 7 | D8 |
+| RST | 8 | D9 |
 
-`SCL`/`SDA` are I2C-style labels but the interface is 4-wire SPI (`SCL` = clock, `SDA` = MOSI). The GC9A01 is write-only, so no MISO is needed, and the backlight is hardwired on (no control pin). Logic is 3.3 V, matching the ESP32-S3 — no level shifting. See [`firmware/doc/WIRING.md`](firmware/doc/WIRING.md) for the full pinout, schematic notes, and dimensions.
+`SCL`/`SDA` are I2C-style labels but the interface is 4-wire SPI (`SCL` = clock, `SDA` = MOSI). The GC9A01 is write-only, so no MISO is needed, and the backlight is hardwired on (no control pin) — which means an unlit panel indicates no power reaching the module, not a software fault. Logic is 3.3 V — no level shifting. See [`firmware/doc/WIRING.md`](firmware/doc/WIRING.md) for the full pinout, schematic notes, and dimensions.
 
 ## Getting started
 
@@ -66,15 +68,15 @@ Look up the four-letter WSR-88D station ID nearest to you. The renderer's `/stat
 
 ### 2. Flash the firmware
 
-The easiest path uses the pre-built binary from the [latest firmware release](https://github.com/caseyjmorton/mr-radar/releases/latest), which bundles MicroPython and all source files into a single image.
+The easiest path uses a pre-built binary from the [latest firmware release](https://github.com/caseyjmorton/mr-radar/releases/latest), which bundles MicroPython and all source files into a single image. There's a separate binary per chip — pick the one matching your board.
 
 1. Install tooling: `pip install esptool`
-2. Download `mr-radar-firmware-vX.Y.Z.bin` from the latest release.
-3. Erase and flash (note the `0x0` offset — the S3 is **not** `0x1000`):
+2. Download `mr-radar-firmware-s3-vX.Y.Z.bin` from the latest release. It targets the **Seeed XIAO ESP32S3 (8 MB flash)**; the filesystem is baked into the image at a fixed size, so flashing it to a 4 MB board produces a device that powers on but never starts — MicroPython can't mount the mismatched filesystem, reformats it, and lands at an empty REPL with no display and no setup AP.
+3. Erase and flash (note the `0x0` offset — **not** `0x1000`):
 
    ```bash
-   esptool --chip esp32s3 --port /dev/ttyACM0 erase_flash
-   esptool --chip esp32s3 --port /dev/ttyACM0 --baud 460800 write-flash 0x0 mr-radar-firmware-vX.Y.Z.bin
+   esptool --chip esp32s3 --port /dev/ttyACM0 erase-flash
+   esptool --chip esp32s3 --port /dev/ttyACM0 --baud 460800 write-flash 0x0 mr-radar-firmware-s3-vX.Y.Z.bin
    ```
 
    The port name varies by OS: `/dev/ttyACM0` on Linux, `/dev/tty.usbmodem*` on macOS, `COM#` on Windows.
@@ -82,8 +84,12 @@ The easiest path uses the pre-built binary from the [latest firmware release](ht
 4. The device boots into portal mode on first power-up — connect to the `mr-radar-setup` WiFi network. The passphrase is unique to your device and shown on the display. Enter your WiFi credentials, NEXRAD station, and renderer URL. If you're using the public instance, the renderer URL is `https://mr-radar.fly.dev`.
 
 > If the board won't enter download mode: hold **BOOT**, tap **RST**, release **BOOT**, then retry.
+>
+> **You cannot brick the board this way.** Download mode lives in mask ROM and can't be erased or overwritten, so a device that won't boot is always recoverable with `erase-flash` and a re-flash at `0x0`. Note that a freshly erased board *boot-loops* — the ROM finds no valid image and resets every couple of seconds, so the serial port flickers in and out. That's normal; esptool connects through it.
 
-**Manual flash (development):** If you prefer to use your own MicroPython build, install `mpremote`, flash a `ESP32_GENERIC_S3` binary from [micropython.org/download](https://micropython.org/download/ESP32_GENERIC_S3/), then copy each file from `firmware/src/` to the device: `mpremote connect /dev/ttyACM0 cp firmware/src/<file> :<file>`.
+**Manual flash (development):** If you prefer to use your own MicroPython build, install `mpremote`, flash an `ESP32_GENERIC_S3-SPIRAM_OCT` binary from [micropython.org/download](https://micropython.org/download/), then copy each file from `firmware/src/` to the device: `mpremote connect /dev/ttyACM0 cp firmware/src/<file> :<file>`. Use the `SPIRAM_OCT` variant, not plain `GENERIC_S3` — the plain build doesn't enable PSRAM, and the 115,200-byte display framebuffer allocation reliably fails with `MemoryError` without it.
+
+> **Bringing up new hardware?** Run `firmware/util/test_pattern.py` to prove the SPI wiring before layering on network code. If the panel stays dark, check whether the backlight is lit: it's hardwired on, so an unlit panel means the module isn't getting power at all.
 
 ### 3. Run the renderer (optional)
 
@@ -181,6 +187,8 @@ Radar updates roughly every 5 minutes upstream, and at the supported zoom level 
 ## Enclosure
 
 A parametric 3D-printable case is in `enclosure/`. It's a three-part assembly (body, back panel, top panel) designed to print cleanly on a 0.6 mm nozzle FDM printer without supports. STL files are published with each [enclosure release](https://github.com/caseyjmorton/mr-radar/releases).
+
+> **Careful with the display screws:** the GC9A01 module is thin glass on a small PCB, mounted to the front panel with screws through its corner holes. Snug is enough — do not overtighten. Over-torquing them can crack or otherwise damage the display. Hand-tighten only, and stop as soon as the panel is seated.
 
 ## Contributing
 

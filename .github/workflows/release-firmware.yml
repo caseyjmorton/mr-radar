@@ -1,16 +1,32 @@
 name: release-firmware
 
-# Builds a single flashable binary (MicroPython base + LittleFS image with
-# all source files), uploads individual source files for OTA delivery, and
-# creates a GitHub Release. Triggered by a firmware-v*.*.* tag or manually.
+# Builds the flashable firmware binary (MicroPython base + LittleFS image
+# holding all source files), generates the OTA manifest, and creates a GitHub
+# Release. Triggered by a firmware-v*.*.* tag or manually.
 #
-# Flash layout (ESP32-S3, 4 MB):
-#   0x000000  MicroPython base firmware (~1.7 MB)
-#   0x200000  LittleFS partition (2 MB) — source .py files, no config.json
+# ONE SUPPORTED TARGET: the Seeed XIAO ESP32S3 (8 MB flash, 8 MB octal PSRAM).
+# The ESP32-C3 and the 4 MB / 2 MB-PSRAM ESP32-S3-Zero were dropped: neither
+# has the memory headroom to hold the 115,200-byte framebuffer alongside WiFi
+# without fragmentation stalls, and the sweep animation misses its frame budget
+# on both.
+#
+# FLASH SIZE IS LOAD-BEARING. MicroPython's ESP32 partition table contains NO
+# vfs entry — the filesystem is created at first boot, sized to fill everything
+# from the end of the app partition (0x200000) to the end of *detected* flash.
+# That is 6 MB on an 8 MB board. LittleFS records its block count in the
+# superblock, so an image built for a different flash size will not mount:
+# MicroPython silently reformats, erasing every .py file, and the device boots
+# to a bare REPL with no main.py — no display, no AP, nothing on serial. It
+# looks exactly like a bricked board. That is what shipped in firmware-v0.2.1
+# (which also used the wrong, non-PSRAM MicroPython base).
+#
+# Flash layout (XIAO ESP32S3, 8 MB flash):
+#   0x000000  MicroPython base firmware (~1.8 MB)
+#   0x200000  LittleFS partition (6 MB = 1536 x 4096) — .py files, no config.json
 #
 # Flashing a fresh device:
-#   esptool.py --chip esp32s3 erase_flash
-#   esptool.py --chip esp32s3 write_flash 0x0 mr-radar-firmware-vX.Y.Z.bin
+#   esptool --chip esp32s3 erase-flash
+#   esptool --chip esp32s3 write-flash 0x0 mr-radar-firmware-s3-vX.Y.Z.bin
 on:
   push:
     tags: ['firmware-v*.*.*']
@@ -30,7 +46,20 @@ concurrency:
 env:
   # Pin the MicroPython base firmware. To upgrade: find the new URL at
   # https://micropython.org/download/ESP32_GENERIC_S3/ and update this line.
-  MICROPYTHON_URL: "https://micropython.org/resources/firmware/ESP32_GENERIC_S3-20260406-v1.28.0.bin"
+  # Verify the filename actually exists before tagging.
+  #
+  # MUST be the SPIRAM_OCT variant, not plain GENERIC_S3: the plain build
+  # doesn't enable octal PSRAM, which leaves only ~226 KB of internal SRAM as
+  # heap and reliably fails the 115,200-byte display framebuffer allocation in
+  # portal.py with MemoryError. Verified on a XIAO ESP32S3 — free heap went
+  # from 226 KB (plain build) to 8.3 MB (SPIRAM_OCT) for the same version.
+  MICROPYTHON_URL: "https://micropython.org/resources/firmware/ESP32_GENERIC_S3-SPIRAM_OCT-20260824-v1.29.0.bin"
+
+  # Filesystem geometry. BLOCK_COUNT * BLOCK_SIZE must equal the vfs partition
+  # MicroPython creates at runtime (flash size - 0x200000), or the image will
+  # not mount. See the flash-layout note at the top of this file.
+  LFS_BLOCK_SIZE: "4096"
+  LFS_BLOCKS:     "1536"   # 6 MB filesystem on 8 MB flash
 
 jobs:
   release:
@@ -56,12 +85,7 @@ jobs:
           echo "version=${TAG#firmware-v}" >> "$GITHUB_OUTPUT"
 
       - name: Install build tools
-        run: pip install esptool littlefs-python
-
-      - name: Download MicroPython base firmware
-        run: |
-          curl -fsSL "$MICROPYTHON_URL" -o micropython.bin
-          echo "MicroPython base: $(wc -c < micropython.bin) bytes"
+        run: pip install "esptool>=5,<6" littlefs-python
 
       - name: Build LittleFS image
         run: |
@@ -69,17 +93,18 @@ jobs:
           from littlefs import LittleFS
           import os
 
-          # 4 MB flash; LittleFS occupies 0x200000–0x3FFFFF (2 MB)
-          BLOCK_SIZE  = 4096
-          BLOCK_COUNT = 512
+          BLOCK_SIZE  = int(os.environ["LFS_BLOCK_SIZE"])
+          BLOCK_COUNT = int(os.environ["LFS_BLOCKS"])
 
-          fs = LittleFS(block_size=BLOCK_SIZE, block_count=BLOCK_COUNT, name_max=255)
           src_dir = "firmware/src"
-          for fname in sorted(os.listdir(src_dir)):
-              fpath = os.path.join(src_dir, fname)
-              if not os.path.isfile(fpath):
-                  continue
-              with open(fpath, "rb") as f:
+          names = [f for f in sorted(os.listdir(src_dir))
+                   if os.path.isfile(os.path.join(src_dir, f))]
+          print(f"source files ({len(names)}): {', '.join(names)}")
+
+          fs = LittleFS(block_size=BLOCK_SIZE, block_count=BLOCK_COUNT,
+                        name_max=255)
+          for fname in names:
+              with open(os.path.join(src_dir, fname), "rb") as f:
                   data = f.read()
               with fs.open(f"/{fname}", "wb") as lf:
                   lf.write(data)
@@ -87,17 +112,55 @@ jobs:
 
           with open("lfs.bin", "wb") as out:
               out.write(bytes(fs.context.buffer))
-          print(f"LittleFS image: {os.path.getsize('lfs.bin'):,} bytes")
+
+          size = os.path.getsize("lfs.bin")
+          expected = BLOCK_COUNT * BLOCK_SIZE
+          if size != expected:
+              raise SystemExit(f"lfs.bin: got {size} bytes, expected {expected}")
+          print(f"LittleFS image: {BLOCK_COUNT} x {BLOCK_SIZE} = {size:,} bytes")
           PYEOF
 
-      - name: Merge into single flashable binary
+      - name: Build firmware binary
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          python3 -m esptool --chip esp32s3 merge_bin \
-            -o "mr-radar-firmware-v${VERSION}.bin" \
+          curl -fsSL "$MICROPYTHON_URL" -o micropython.bin
+          echo "MicroPython base: $(wc -c < micropython.bin) bytes"
+          python3 -m esptool --chip esp32s3 merge-bin \
+            --flash-size 8MB \
+            -o "mr-radar-firmware-s3-v${VERSION}.bin" \
             0x0       micropython.bin \
             0x200000  lfs.bin
-          echo "Merged binary: $(wc -c < "mr-radar-firmware-v${VERSION}.bin") bytes"
+          echo "Merged binary: $(wc -c < "mr-radar-firmware-s3-v${VERSION}.bin") bytes"
+
+      - name: Verify the embedded filesystem mounts
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          python3 - <<'PYEOF'
+          from littlefs import LittleFS
+          import os
+
+          BLOCK_SIZE  = int(os.environ["LFS_BLOCK_SIZE"])
+          BLOCK_COUNT = int(os.environ["LFS_BLOCKS"])
+          path = f"mr-radar-firmware-s3-v{os.environ['VERSION']}.bin"
+
+          # Read the filesystem back out of the *merged* artifact and mount it.
+          # This is the check that would have caught firmware-v0.2.1 in CI.
+          data = open(path, "rb").read()
+          region = data[0x200000:0x200000 + BLOCK_COUNT * BLOCK_SIZE]
+
+          fs = LittleFS(block_size=BLOCK_SIZE, block_count=BLOCK_COUNT,
+                        name_max=255, mount=False)
+          fs.context.buffer[:] = bytearray(region)
+          fs.mount()
+
+          found = sorted(fs.listdir("/"))
+          print(f"mounted OK from {path} @0x200000: {', '.join(found)}")
+          for required in ("main.py", "config.py", "radar.py", "version.py"):
+              if required not in found:
+                  raise SystemExit(f"missing {required} in embedded filesystem")
+          PYEOF
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
 
       - name: Generate OTA manifest
         run: |
@@ -145,5 +208,5 @@ jobs:
             --title "Firmware ${VERSION}" \
             --generate-notes \
             --verify-tag \
-            "mr-radar-firmware-v${VERSION}.bin" \
+            "mr-radar-firmware-s3-v${VERSION}.bin" \
             manifest.json
