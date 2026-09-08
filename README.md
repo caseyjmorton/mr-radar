@@ -99,7 +99,7 @@ The default device experience uses the public instance at `https://mr-radar.fly.
 
 ```bash
 docker pull ghcr.io/caseyjmorton/mr-radar-renderer:latest
-docker run -p 3000:3000 ghcr.io/caseyjmorton/mr-radar-renderer:latest
+docker run -p 3000:3000 -e CARTO_API_KEY=your-key ghcr.io/caseyjmorton/mr-radar-renderer:latest
 ```
 
 **From source:**
@@ -107,8 +107,17 @@ docker run -p 3000:3000 ghcr.io/caseyjmorton/mr-radar-renderer:latest
 ```bash
 cd renderer
 npm install
-npm start          # listens on :3000
+CARTO_API_KEY=your-key npm start   # listens on :3000
 ```
+
+**Configuration:**
+
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `PORT` | no | `3000` | Port to listen on |
+| `CARTO_API_KEY` | for the `vintage` theme | — | CARTO basemap key. Free, no account: [carto.com/basemaps/apikey](https://carto.com/basemaps/apikey) |
+
+Without `CARTO_API_KEY` the renderer still starts and serves frames, but the `vintage` theme's base map arrives watermarked "API KEY REQUIRED" — so it logs a warning at startup. Because `vintage` is the **default theme**, expect to hit this on a fresh self-host. The `modern` theme uses OpenStreetMap and needs no key. On fly.io, set it with `fly secrets set CARTO_API_KEY=your-key` (this restarts the app).
 
 ## Clock & timezone
 
@@ -176,9 +185,14 @@ Returns `{"ok": true, "ts": <unix-ms>, "version": "<X.Y.Z>"}`.
 ## Data sources & attribution
 
 - **Radar:** [RainViewer](https://www.rainviewer.com/) Weather Maps API — free for personal and educational use. As of early 2026 it serves past radar (2-hour history, ~10-minute frames) at up to zoom level 7, refreshed roughly every 5 minutes.
-- **Base map:** OpenStreetMap contributors. Map data © OpenStreetMap contributors, available under the Open Database License.
+- **Base map (`modern` theme):** [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors. Map data © OpenStreetMap contributors, available under the Open Database License.
+- **Base map (`vintage` theme):** [CARTO](https://carto.com/) dark basemaps (`dark_nolabels` + `dark_only_labels`), built on OpenStreetMap data. **© CARTO, © OpenStreetMap contributors.**
 
-Radar data is provided by RainViewer; this project is not affiliated with or endorsed by RainViewer. Please honor each provider's terms of use when self-hosting the renderer.
+> **Attribution is a condition of use, not a courtesy.** CARTO grants its free basemap tier explicitly in exchange for keeping the CARTO and OpenStreetMap credits visible, and the ODbL carries the same requirement for OSM data. Because mr-radar renders to a 240×240 round display with no room for map chrome, that credit is discharged here in this README and in the renderer's documentation rather than on the device itself. Keep it intact — including in any fork or self-hosted deployment.
+
+CARTO's basemap CDN requires an API key; unkeyed requests still return HTTP 200 but the tiles come back stamped with an "API KEY REQUIRED" watermark. Get a free key at [carto.com/basemaps/apikey](https://carto.com/basemaps/apikey) (no account needed) and supply it to the renderer as `CARTO_API_KEY`. The free tier allows 5 million tile requests per calendar month for non-commercial use, which the renderer's tile and frame caches keep it far below. That watermark is an enforcement notice, not attribution — it disappears once a key is present, so it does not satisfy the requirement above.
+
+Radar data is provided by RainViewer; this project is not affiliated with or endorsed by RainViewer, CARTO, or the OpenStreetMap Foundation. Please honor each provider's terms of use when self-hosting the renderer.
 
 ## A note on accuracy & timing
 

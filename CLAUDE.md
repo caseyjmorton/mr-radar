@@ -133,9 +133,10 @@ Returns `{"ok": true, "ts": <unix-ms>, "version": "<X.Y.Z>"}`. Use for load-bala
 ## Upstream data sources (constraints, current as of early 2026)
 
 - **RainViewer Weather Maps API** — free for personal/educational use, asks for attribution with a link to rainviewer.com. As of Jan 1 2026: max zoom level 7, 100 requests/IP/min, "Universal Blue" color scheme only, past radar only (2h history, 10-min frames), PNG only. Refreshes every ~5 min. The renderer checks RainViewer's timestamp JSON and only re-composites when a genuinely new frame exists.
-- **OpenStreetMap tiles** — subject to a tile usage policy that forbids bulk/automated abuse. This is precisely why devices must NOT hit OSM directly. The renderer caches aggressively and identifies itself with a proper `User-Agent`. Respect the policy; consider a base-map provider with terms friendlier to this use if scale grows.
+- **OpenStreetMap tiles** — the `modern` theme's base map (`tiles.js` → `osmTileUrl`). Subject to a tile usage policy that forbids bulk/automated abuse. This is precisely why devices must NOT hit OSM directly. The renderer caches aggressively and identifies itself with a proper `User-Agent`. Respect the policy; consider a base-map provider with terms friendlier to this use if scale grows.
+- **CARTO dark basemaps** — the `vintage` theme's base map (`tiles.js` → `cartoDarkUrl`, styles `dark_nolabels` + `dark_only_labels`), built on OSM data. **`vintage` is the default theme** (`composite.js` `renderFrame` default and the `/config.json` default), so in practice most of the fleet renders CARTO, not OSM. Requires an API key: unkeyed requests still return HTTP 200, but tiles arrive stamped with an "API KEY REQUIRED" watermark. Free tier is 5M tile requests/month, non-commercial, keyed via `?key=` and configured as `CARTO_API_KEY`. Free keys come from <https://carto.com/basemaps/apikey> with no account.
 
-Attribution for both providers must be preserved in the project (README, and ideally surfaced by the renderer).
+Attribution for all three providers must be preserved in the project (README, and ideally surfaced by the renderer). For CARTO and OSM this is a **condition of the licence**, not a courtesy — CARTO grants the free tier explicitly in exchange for keeping the CARTO + OSM credits visible, and the ODbL requires the same for OSM data. The 240×240 round display has no room for map chrome, so the credit is discharged in the README and renderer docs instead of on the device; do not drop it when editing those files. Note that the unkeyed "API KEY REQUIRED" watermark is an **enforcement notice, not attribution** — it names no rights holder and vanishes as soon as a key is supplied, so it cannot be relied on to satisfy this.
 
 ## Renderer implementation (Node.js)
 
@@ -150,7 +151,7 @@ The renderer lives in `renderer/` and is implemented in Node.js (≥20) using `s
 | `src/composite.js` | Core pipeline: fetch → stitch → composite → crop → encode |
 | `src/tileMath.js` | Web Mercator slippy-map math; computes 2×2 tile block |
 | `src/rainviewer.js` | RainViewer timestamp API + tile URL resolution; 2-min cache |
-| `src/tiles.js` | Tile fetch + in-memory LRU cache (OSM: 24h TTL, radar: 5min TTL) |
+| `src/tiles.js` | Tile fetch + in-memory LRU cache (OSM: 24h TTL, radar: 5min TTL); builds OSM and CARTO tile URLs and appends the `CARTO_API_KEY` when set |
 | `src/stations.js` | Static NEXRAD station database; `resolveStation(id)` |
 
 **Caching layers (innermost to outermost):**

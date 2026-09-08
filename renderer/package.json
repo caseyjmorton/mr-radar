@@ -1,6 +1,6 @@
 {
   "name": "mr-radar-renderer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Stateless NEXRAD radar image renderer for the mr-radar display",
   "main": "src/server.js",
