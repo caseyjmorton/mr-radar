@@ -413,18 +413,32 @@ _WHITE = 0xFFFF          # white
 _GREEN = _sw(0x07E0)     # bright green
 _CYAN  = _sw(0x07FF)     # cyan
 _GRAY  = _sw(0x8410)     # medium gray
+_YELLOW = _sw(0xFFE0)    # yellow (used for the fallback-mode status line)
+
+W, H = 240, 240
 
 
-def _draw_portal_screen():
-    W, H = 240, 240
-    buf = bytearray(W * H * 2)
-    fb = framebuf.FrameBuffer(buf, W, H, framebuf.RGB565)
+def _draw_portal_screen(tft, buf, fb, status_line=None):
+    # buf/fb/tft are allocated by run() before the AP comes up. A fresh
+    # 115,200-byte bytearray requested at this point can fail with MemoryError
+    # even when gc.mem_free() reports plenty of *total* free bytes: WiFi/lwIP
+    # buffers fragment the heap, so no single contiguous block that big
+    # remains. This was fatal on the low-memory boards we no longer support;
+    # the XIAO's 8 MB PSRAM makes it unlikely, but allocating early and reusing
+    # the buffer costs nothing and keeps the failure mode closed.
     fb.fill(_BG)
 
     def ct(text, y, color):
         fb.text(text, (W - len(text) * 8) // 2, y, color)
 
-    ct('mr-radar', 55, _GREEN)
+    if status_line:
+        # Fallback recovery mode (WiFi connect failed) - shift the title up to
+        # make room for a status line explaining why setup mode reappeared,
+        # so it doesn't read the same as first-time setup.
+        ct('mr-radar', 42, _GREEN)
+        ct(status_line, 58, _YELLOW)
+    else:
+        ct('mr-radar', 55, _GREEN)
     fb.hline(60, 73, 120, _GRAY)
     ct('WiFi:', 85, _GRAY)
     ct(_AP_SSID, 99, _WHITE)
@@ -435,13 +449,28 @@ def _draw_portal_screen():
     ct('fw v' + __version__, 200, _GRAY)
 
     try:
-        tft = _config.make_display()
         tft.blit_buffer(buf, 0, 0, W, H)
     except Exception as e:
         print('portal: display error:', e)
 
 
-def run():
+def run(timeout_s=None, status_line=None):
+    """Run the captive-portal AP + settings form.
+
+    timeout_s=None (the default, used for first-time setup) blocks forever -
+    there's no config yet, so there's nothing sensible to fall back to.
+    A caller recovering from a WiFi failure (see radar.main()) passes a
+    bounded timeout_s instead: if nobody submits the form within that
+    window, run() gives up, turns the AP back off, and returns so the
+    caller can retry the original connection.
+    """
+    # Allocate the display and its framebuffer before the AP comes up (see the
+    # note in _draw_portal_screen) so the one-time 115,200-byte buffer is
+    # grabbed while the heap is still contiguous.
+    tft = _config.make_display()
+    buf = bytearray(W * H * 2)
+    fb = framebuf.FrameBuffer(buf, W, H, framebuf.RGB565)
+
     print('portal: starting access point...')
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
@@ -455,7 +484,7 @@ def run():
         time.sleep_ms(100)
 
     print('portal: AP up —', _AP_SSID, 'pass:', _AP_PASS, '— open http://192.168.4.1')
-    _draw_portal_screen()
+    _draw_portal_screen(tft, buf, fb, status_line)
 
     cfg = _load_config()
 
@@ -467,8 +496,20 @@ def run():
     srv.bind(('0.0.0.0', 80))
     srv.listen(2)
 
+    win_deadline = None
+    if timeout_s is not None:
+        win_deadline = time.ticks_add(time.ticks_ms(), timeout_s * 1000)
+        srv.settimeout(1.0)  # wake periodically to check win_deadline
+
     while True:
-        conn, addr = srv.accept()
+        if win_deadline is not None and time.ticks_diff(win_deadline, time.ticks_ms()) < 0:
+            print('portal: fallback window expired, giving up')
+            ap.active(False)
+            return
+        try:
+            conn, addr = srv.accept()
+        except OSError:
+            continue  # accept() timed out (bounded mode only) - recheck deadline
         print('portal: connection from', addr)
         cfg = _handle(conn, cfg)
 

@@ -12,6 +12,7 @@ import socket
 import ssl
 import time
 import _thread
+import machine
 
 import framebuf
 
@@ -34,6 +35,14 @@ FETCH_CHUNK       = 1024      # bytes per socket read while downloading a frame
 FETCH_THROTTLE_MS = 80        # sleep between read chunks so the download never starves
                               # the render thread (spreads ~115 KB across ~10 s)
 
+# If the saved WiFi credentials don't work (typo, router down, moved networks),
+# main() falls back to the captive-portal AP for WIFI_FALLBACK_AP_S so the user
+# can fix it without serial/physical access, then reboots and tries again. This
+# repeats indefinitely: transient outages self-heal on a later retry, and a bad
+# password gets a fresh recovery window roughly every 6 minutes.
+WIFI_CONNECT_TIMEOUT_S = 60
+WIFI_FALLBACK_AP_S     = 300
+
 _lock = _thread.allocate_lock()
 _latest = None                # most recent good frame (bytearray), or None
 _ntp_synced = False
@@ -46,6 +55,7 @@ _S_GREEN  = 0xE007   # bright green  (0x07E0 BE)
 _S_CYAN   = 0xFF07   # cyan          (0x07FF BE)
 _S_GRAY   = 0x1084   # mid-gray      (0x8410 BE)
 _S_YELLOW = 0xE0FF   # yellow        (0xFFE0 BE)
+_S_RED    = 0x00F8   # red           (0xF800 BE)
 
 # Clock overlay — same color as the sweep bar, no background (radar shows through).
 # _CLOCK_COLOR = 0xE007: framebuf (LE) stores [0x07, 0xE0] per pixel, which is
@@ -381,7 +391,16 @@ def main():
     dst = bool(getattr(secrets, 'DST', False))
 
     _draw_status(tft, secrets.WIFI_SSID, None, 'Connecting...', _S_YELLOW)
-    wlan = connect_wifi()
+    try:
+        wlan = connect_wifi(timeout=WIFI_CONNECT_TIMEOUT_S)
+    except Exception as e:
+        print('wifi: failed to connect, falling back to setup mode:', e)
+        _draw_status(tft, secrets.WIFI_SSID, None, 'WiFi failed', _S_RED)
+        time.sleep(2)
+        portal.run(timeout_s=WIFI_FALLBACK_AP_S, status_line='WiFi connect failed')
+        print('wifi: fallback window expired, retrying...')
+        machine.reset()
+        return  # unreachable; machine.reset() does not return
     _try_ntp()
     device_ip = wlan.ifconfig()[0]
     _draw_status(tft, secrets.WIFI_SSID, 'http://' + device_ip, 'Connected!', _S_GREEN)

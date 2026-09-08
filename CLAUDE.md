@@ -10,7 +10,7 @@ The defining product constraint: **a person must be able to flash the firmware, 
 
 ## Architecture (read this before writing any code)
 
-The microcontroller should not decode or composite map tiles: there is no on-device PNG decoder, and fetching tiles directly from providers would violate OpenStreetMap's tile usage policy when fanned out across many devices. (The ESP32-S3 has 2 MB PSRAM, so RAM is no longer the binding constraint it was on the C3 — but the no-decoder and provider-ToS reasons stand on their own.) Therefore the work is split:
+The microcontroller should not decode or composite map tiles: there is no on-device PNG decoder, and fetching tiles directly from providers would violate OpenStreetMap's tile usage policy when fanned out across many devices. (The ESP32-S3 has 8 MB PSRAM, so RAM is no longer the binding constraint it was on the ESP32-C3 this project originally targeted — but the no-decoder and provider-ToS reasons stand on their own.) Therefore the work is split:
 
 ```
 ESP32-S3 firmware  --HTTPS GET-->  stateless renderer  --tiles-->  RainViewer + OSM
@@ -43,48 +43,32 @@ Keep firmware and renderer concerns strictly separated. They communicate only ov
 
 ## Hardware target
 
-- **Primary MCU: Waveshare ESP32-S3-Zero.** Dual-core Xtensa LX7 @ 240 MHz, 512 KB SRAM + 2 MB PSRAM, 4 MB flash, native USB-CDC serial. (We originally targeted an ESP32-C3 "super mini," but those boards have a notorious antenna/PA defect — a unit that refused WiFi association at any usable range, while a known-good board on the same network connected instantly, forced the switch.)
-- **Secondary MCU: ESP32-C3.** `firmware/src/config.py` detects the chip at runtime and selects the matching pin map, so the same `firmware/src` tree ships to both — see "Dual-chip support" below. The C3 super-mini antenna/PA defect above is a **hardware** problem no firmware change fixes: if your C3 boards are that exact board, test one at your real install distance before flashing the whole batch. If they're a different C3 board, the defect may not apply.
-- **Display:** 240×240 round TFT, GC9A01 controller, SPI (write-only, no MISO). 1.28" diameter. Same display and wiring approach on both chips.
-- **Default pin map (S3)** — uses the module's silkscreen labels (assign explicitly in code; labels are I2C-style but the interface is 4-wire SPI):
+- **MCU: Seeed XIAO ESP32S3** — the only supported board. Dual-core Xtensa LX7 @ 240 MHz, 512 KB SRAM + 8 MB embedded octal PSRAM, **8 MB flash**, native USB-CDC serial. The flash size is load-bearing, not trivia: the released binary embeds a 6 MB LittleFS image sized for 8 MB flash and will **not** mount on a 4 MB board — see the header of `release-firmware.yml`.
 
-  | Module pin | Function | GPIO |
-  | --- | --- | --- |
-  | VCC | 3.3–5 V power (onboard XC6206 LDO) | 3V3 |
-  | GND | Ground | GND |
-  | SCL | SPI clock | 4 |
-  | SDA | SPI data (MOSI) | 5 |
-  | DC | Data/command | 6 |
-  | CS | Chip select | 7 |
-  | RST | Reset (onboard 10k pullup) | 8 |
+  **Boards that were dropped, and why.** The project originally targeted an ESP32-C3 "super mini," but those boards have a notorious antenna/PA defect (a unit here refused WiFi association at any usable range while a known-good board on the same network connected instantly). It then ran on a Waveshare ESP32-S3-Zero (4 MB flash, 2 MB PSRAM). Both are now unsupported: neither has the memory headroom to hold the 115,200-byte framebuffer alongside WiFi without fragmentation stalls, and the sweep animation misses its frame budget on both. Do not reintroduce runtime chip detection or a second pin map without raising it as a constraint change first.
+- **Display:** 240×240 round TFT, GC9A01 controller, SPI (write-only, no MISO). 1.28" diameter.
+- **Pin map** — the display's silkscreen labels are I2C-style but the interface is 4-wire SPI. The GPIO column is **raw GPIO numbers, not the XIAO's `D` labels**; the `XIAO pad` column gives the silkscreen equivalent. A carrier PCB laid out against the `D` labels looks right on paper and fails silently, because the display is write-only and reports nothing back.
 
-  **No backlight pin:** this module's backlight is hardwired on (LEDA → 2Ω → 3.3 V), so PWM dimming is not possible without a hardware mod. On the ESP32-S3, GPIO8 is a plain GPIO (not a strapping pin, unlike the C3), so RST here is unconstrained and the display's onboard 10k pullup is harmless. Logic is 3.3 V, matching the S3 — no level shifting needed. Verified working with `SPI(1)` (its default `miso=13` is a free pin; avoid `SPI(2)`, whose default `miso=37` collides with PSRAM). See `firmware/doc/WIRING.md` for the full pinout, schematic notes, and dimensions. Treat the pin map as configuration, not hard-coded magic numbers.
+  | Module pin | Function | GPIO | XIAO pad |
+  | --- | --- | --- | --- |
+  | VCC | 3.3–5 V power (onboard XC6206 LDO) | 3V3 | 3V3 |
+  | GND | Ground | GND | GND |
+  | SCL | SPI clock | 4 | D3 |
+  | SDA | SPI data (MOSI) | 5 | D4 |
+  | DC | Data/command | 6 | D5 |
+  | CS | Chip select | 7 | D8 |
+  | RST | Reset (onboard 10k pullup) | 8 | D9 |
 
-- **Pin map (C3)** — GPIO2/8/9 are strapping pins on the C3 (unlike the S3), and most "super mini" boards also wire an onboard WS2812 LED to GPIO8, so RST moves to GPIO10 and MISO is pinned explicitly rather than trusted to an unverified per-chip default:
+  **No backlight pin:** this module's backlight is hardwired on (LEDA → 2Ω → 3.3 V), so PWM dimming is not possible without a hardware mod. Because it cannot be switched off, **an unlit panel means the module has no power** — that single observation splits a display fault into "power" vs "signal" immediately. On the ESP32-S3, GPIO8 is a plain GPIO (not a strapping pin), so RST is unconstrained and the display's onboard 10k pullup is harmless — and that pullup is the *only* way firmware can detect that the display is powered and connected: configure RST as an input with the internal pull-**down** and read it (`1` = present, follows the pull = absent). The other four lines are high-impedance inputs with no pullups and cannot be probed. Logic is 3.3 V — no level shifting. Verified working with `SPI(1)` (its default `miso=13` is a free pin; avoid `SPI(2)`, whose default `miso=37` collides with PSRAM). See `firmware/doc/WIRING.md` for the full pinout, schematic notes, and dimensions. Treat the pin map as configuration, not hard-coded magic numbers.
 
-  | Module pin | Function | GPIO |
-  | --- | --- | --- |
-  | SCL | SPI clock | 4 |
-  | SDA | SPI data (MOSI) | 5 |
-  | DC | Data/command | 6 |
-  | CS | Chip select | 7 |
-  | RST | Reset | 10 |
-  | (MISO, unused) | pinned explicitly, not wired to the display | 1 |
-
-  **This C3 pin map has not been hardware-verified** — it's derived from documented C3 strapping/LED constraints, not tested on a real board yet. Validate with the test-pattern path (`firmware/util/test_pattern.py`) before layering on network complexity. See `firmware/doc/WIRING.md` for full detail.
-
-### Flashing facts that bite people (both chips share these)
+### Flashing facts that bite people
 - Flash offset is **`0x0`**, NOT `0x1000` (that's the classic ESP32). Getting this wrong produces a board that won't boot.
-- Erase before flashing: `esptool.py --chip esp32s3 erase_flash` (or `--chip esp32c3` for the C3).
-- Use the `ESP32_GENERIC_S3` MicroPython build for the S3, `ESP32_GENERIC_C3` for the C3.
-- If auto-reset into download mode fails: hold BOOT, tap RST (or replug USB), release BOOT.
+- Erase before flashing: `esptool --chip esp32s3 erase-flash`.
+- Use the `ESP32_GENERIC_S3-SPIRAM_OCT` MicroPython build. The plain (non-OCT) build doesn't enable PSRAM — only ~226 KB of internal SRAM is available as heap, which reliably fails the 115,200-byte display framebuffer allocation in `portal.py` with `MemoryError`. Verified on the XIAO ESP32S3: free heap went from 226 KB (plain build) to 8.3 MB (SPIRAM_OCT build) for the identical MicroPython version.
+- **The LittleFS image must match the board's flash size.** MicroPython's ESP32 partition table has **no `vfs` entry** — the filesystem is created at first boot to fill everything from the end of the app partition (`0x200000`) to the end of detected flash. That is 6 MB on an 8 MB board and 2 MB on a 4 MB board. LittleFS records its block count in the superblock, so an image built for the wrong size will not mount: MicroPython silently reformats, erasing every `.py` file, and the device boots to a bare REPL with no `main.py` — no display, no AP, nothing on serial. It looks exactly like a bricked board. This shipped in `firmware-v0.2.1`, which also used the wrong (non-PSRAM) MicroPython base. The release workflow therefore builds the image to exactly 1536 × 4096 = 6 MB, and CI mounts the filesystem back out of the *merged* artifact to prove it before publishing.
+- If auto-reset into download mode fails: hold BOOT, tap RST (or replug USB), release BOOT. Download mode lives in mask ROM and cannot be erased or overwritten, so **a board that won't boot is never bricked** — `erase-flash` plus a re-flash at `0x0` always recovers it.
 - Native USB-CDC re-enumerates after flashing/reset, so the serial device name (e.g. `/dev/ttyACM0`) can change — re-check it if a connection fails.
-
-### Dual-chip support
-
-The device-side source in `firmware/src/` is chip-agnostic MicroPython except for the pin map. `config.py` picks the S3 or C3 pin map at runtime via `os.uname().machine` — everything else (`radar.py`, `sweep.py`, `portal.py`, etc.) is unchanged between chips. `@micropython.native`/`@micropython.viper` are expected to compile for either architecture (Xtensa for S3, RV32IMC for C3) from the same source, since MicroPython's native emitter supports both — this is an assumption pending hardware verification on the C3.
-
-A single flashable binary cannot span both chips — the S3 is Xtensa and the C3 is RISC-V, fundamentally different machine code. `release-firmware.yml` builds two separate merged binaries (`mr-radar-firmware-s3-vX.Y.Z.bin`, `mr-radar-firmware-c3-vX.Y.Z.bin`) from the one shared `firmware/src` LittleFS image, plus one OTA manifest (source is identical across chips).
+- **A blank flash boot-loops, and looks like a dead board.** After `erase-flash` the ROM finds no valid image, reboots, and repeats every ~2 s, so `/dev/ttyACM0` appears and vanishes and a point-in-time `ls` or sysfs scan misses it entirely. This is normal, not damage. `esptool --before default-reset --connect-attempts 5` still connects through the flicker, so you rarely need to hold BOOT. To see what's actually happening: `dmesg` is usually root-only (`kernel.dmesg_restrict=1`), but **`journalctl -k` works unprivileged** — enumeration churn, `can't set config #1, error -32`, or `error -71` all show up there.
 
 ## The HTTP contract (firmware <-> renderer)
 
@@ -334,7 +318,7 @@ git push origin firmware-v0.2.0
 
 **What each workflow does:**
 
-- `release-firmware.yml` — downloads `ESP32_GENERIC_S3-<date>-v<version>.bin` and `ESP32_GENERIC_C3-<date>-v<version>.bin` from micropython.org (URLs pinned as `MICROPYTHON_S3_URL` / `MICROPYTHON_C3_URL` in the workflow env; update both when upgrading MicroPython, and verify each filename actually exists before tagging), builds one shared LittleFS image from `firmware/src/`, merges it with each base firmware into two flashable binaries (`mr-radar-firmware-s3-vX.Y.Z.bin`, `mr-radar-firmware-c3-vX.Y.Z.bin`), generates one `manifest.json` with raw.githubusercontent.com URLs for OTA (source is shared across chips), and creates a GitHub Release with all three as assets.
+- `release-firmware.yml` — downloads `ESP32_GENERIC_S3-SPIRAM_OCT-<date>-v<version>.bin` from micropython.org (URL pinned as `MICROPYTHON_URL` in the workflow env; verify the filename actually exists before tagging), builds a 6 MB LittleFS image from `firmware/src/` (geometry in `LFS_BLOCK_SIZE` / `LFS_BLOCKS`), merges the two into `mr-radar-firmware-s3-vX.Y.Z.bin`, **mounts the filesystem back out of the merged artifact to verify it** before publishing, generates `manifest.json` with raw.githubusercontent.com URLs for OTA, and creates a GitHub Release with both as assets.
 - `release-renderer.yml` — builds and pushes the Docker image to GHCR as `ghcr.io/caseyjmorton/mr-radar-renderer:<version>` and `:latest`, then creates a GitHub Release with the image reference.
 - `release-enclosure.yml` — builds STLs with CadQuery, attaches them to a GitHub Release.
 - `deploy-renderer.yml` — deploys to fly.io on `renderer-v*.*.*` tag or push to `main` that touches `renderer/`. Requires approval at the `production` environment gate. The environment allows deploys from the `main` branch and `renderer-v*.*.*` tags.
@@ -344,8 +328,8 @@ git push origin firmware-v0.2.0
 **Done:**
 
 1. ✅ Renderer MVP — fetch + composite + crop + serve RGB565/JPEG; station database; themes.
-2. ✅ MicroPython flashed; REPL over serial verified (ESP32-S3-Zero).
-3. ✅ Display bring-up: vendored GC9A01 driver (`gc9a01py.py`) + test pattern; wiring proven on the S3-Zero.
+2. ✅ MicroPython flashed; REPL over serial verified (XIAO ESP32S3).
+3. ✅ Display bring-up: vendored GC9A01 driver (`gc9a01py.py`) + test pattern; wiring proven on the XIAO, including on a custom carrier PCB at the full 40 MHz SPI clock from cold power-up.
 4. ✅ Firmware client loop (`radar.py`): WiFi + `GET /frame?station=KILN&fmt=rgb565` + blit + sleep, tested end-to-end against the renderer.
 5. ✅ PPI sweep animation (`sweep.py`): clock-driven radial sweep with anti-aliased line, persistence glow trail (20° behind the sweep, quadratic alpha ramp), dirty-rect band blit.
 6. ✅ Provisioning: captive-portal AP (`portal.py`) on first boot; WPA2 passphrase derived from chip ID; settings drawn on display. Config stored in `/config.json`; `secrets.py` retired.
